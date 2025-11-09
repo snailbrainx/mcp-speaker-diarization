@@ -1,0 +1,49 @@
+# Environment
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+test_env/
+
+# Logs
+*.log
+logs/
+
+# Data and volumes (content excluded, structure preserved)
+volumes/*
+!volumes/.gitkeep
+data/*
+!data/.gitkeep
+*.db
+*.sqlite
+*.wav
+*.mp3
+*.m4a
+*.flac
+*.ogg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Pytest cache
+.pytest_cache/
+*.json
+/tests

@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  speaker-diarization:
+    build: .
+    container_name: speaker-diarization-app
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - DATABASE_URL=sqlite:////app/volumes/speakers.db
+      - HF_TOKEN=${HF_TOKEN:-}
+    ports:
+      - "8000:8000"  # FastAPI backend + Gradio (mounted at /gradio)
+    volumes:
+      # Persistent storage for speaker database and embeddings
+      - ./volumes:/app/volumes
+      # Optional: Mount for audio files
+      - ./data:/app/data
+      # Backup snapshots
+      - ./backups:/app/backups
+      # Model caches (persist downloaded models)
+      - ./volumes/huggingface_cache:/root/.cache/huggingface
+      # Note: faster-whisper uses huggingface cache, not separate whisper cache
+      # Development: Mount source code (comment out for production)
+      - ./app:/app/app
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped

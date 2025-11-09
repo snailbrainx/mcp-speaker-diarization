@@ -1,0 +1,43 @@
+# Core dependencies
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart>=0.0.18
+pydantic==2.11.0
+pydantic-settings==2.6.1
+
+# AI/ML dependencies
+# Explicitly upgrade entire PyTorch ecosystem for pyannote 4.0.1 compatibility
+torch
+torchvision
+torchaudio
+pyannote.audio==4.0.1
+huggingface_hub>=1.1.0
+omegaconf
+faster-whisper==1.2.1
+soundfile
+
+# Database
+sqlalchemy==2.0.36
+alembic==1.14.0
+
+# Web UI
+gradio==5.49.1
+
+# Utilities
+numpy>=2.0.0
+scikit-learn>=1.6.1
+python-dotenv==1.0.1
+aiofiles==23.2.1
+pydub==0.25.1
+sounddevice==0.5.1
+
+# MCP Server
+mcp>=1.0.0
+
+# Testing
+pytest==8.3.3
+pytest-asyncio==0.24.0
+httpx==0.27.2
+pytest-cov==6.0.0
+pytest-mock==3.14.0
+pytest-timeout==2.3.1
