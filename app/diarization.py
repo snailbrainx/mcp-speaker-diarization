@@ -34,6 +34,12 @@ class SpeakerRecognitionEngine:
 
         print(f"Speaker Recognition Engine initialized on device: {self.device}")
 
+    def clear_gpu_cache(self):
+        """Clear GPU memory cache to prevent memory accumulation"""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+
     @property
     def diarization_pipeline(self):
         """Lazy load diarization pipeline"""
@@ -117,7 +123,8 @@ class SpeakerRecognitionEngine:
         Returns:
             Speaker embedding as numpy array
         """
-        embedding = self.embedding_model(audio_file)
+        with torch.no_grad():
+            embedding = self.embedding_model(audio_file)
         return np.array(embedding)
 
     def diarize(self, audio_file: str) -> Dict:
@@ -146,7 +153,8 @@ class SpeakerRecognitionEngine:
 
         print(f"Running diarization on {audio_file}...")
         try:
-            output = self.diarization_pipeline(audio_file)
+            with torch.no_grad():
+                output = self.diarization_pipeline(audio_file)
         finally:
             # Clean up temp WAV file if created
             if temp_wav_file and os.path.exists(temp_wav_file):
@@ -288,7 +296,8 @@ class SpeakerRecognitionEngine:
 
         segment = Segment(start_time, end_time)
         try:
-            embedding = self.embedding_model.crop(audio_file, segment)
+            with torch.no_grad():
+                embedding = self.embedding_model.crop(audio_file, segment)
             return np.array(embedding)
         except Exception as e:
             # Pyannote can throw sample mismatch errors at file boundaries

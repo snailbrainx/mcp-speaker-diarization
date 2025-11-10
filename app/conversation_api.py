@@ -168,6 +168,9 @@ async def reprocess_conversation(
 
     db.commit()
 
+    # Clear GPU cache after reprocessing
+    engine.clear_gpu_cache()
+
     return {"message": "Conversation reprocessed", "segments": len(result["segments"])}
 
 
@@ -369,6 +372,9 @@ async def identify_speaker_in_segment(
 
     db.commit()
     db.refresh(segment)
+
+    # Clear GPU cache after all embedding extractions
+    engine.clear_gpu_cache()
 
     return {
         "message": f"Speaker identified as {speaker.name}{merge_msg}. Updated {updated_count + 1} segment(s) total.",

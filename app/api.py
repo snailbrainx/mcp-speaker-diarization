@@ -85,6 +85,9 @@ async def enroll_speaker(
         db.commit()
         db.refresh(speaker)
 
+        # Clear GPU cache after embedding extraction
+        engine.clear_gpu_cache()
+
         return speaker
 
     finally:
@@ -230,6 +233,9 @@ async def process_audio(
         recording.duration = max(s["end"] for s in result["segments"])
         db.commit()
         db.refresh(recording)
+
+        # Clear GPU cache after audio processing
+        engine.clear_gpu_cache()
 
         # Return result
         return DiarizationResult(

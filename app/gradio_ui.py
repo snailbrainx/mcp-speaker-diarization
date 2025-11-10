@@ -80,6 +80,9 @@ class GradioInterface:
             db.add(speaker)
             db.commit()
 
+            # Clear GPU cache after embedding extraction
+            self.engine.clear_gpu_cache()
+
             return f"✓ Successfully enrolled speaker '{name}'"
 
         except Exception as e:
@@ -480,6 +483,9 @@ class GradioInterface:
                 db.add(segment)
 
             db.commit()
+
+            # Clear GPU cache after full audio processing
+            self.engine.clear_gpu_cache()
 
             return summary, segments_df
 
@@ -1072,6 +1078,9 @@ Status: {conv.status} | Format: {conv.audio_format or 'N/A'}
             db.commit()
             db.close()
 
+            # Clear GPU cache after segment processing
+            self.engine.clear_gpu_cache()
+
             # Cleanup temp file
             if os.path.exists(segment_info["audio_path"]):
                 os.remove(segment_info["audio_path"])
@@ -1221,6 +1230,9 @@ Status: {conv.status} | Format: {conv.audio_format or 'N/A'}
             })
 
             print(f"✅ Segment {segment_info['id']} processed and saved")
+
+            # Clear GPU cache after processing to prevent memory accumulation
+            self.engine.clear_gpu_cache()
 
         except RuntimeError as e:
             # Whisper tensor errors - likely due to model state issues
@@ -1547,6 +1559,14 @@ Buffer: {stats['buffer_chunks']} chunks
             if not segment:
                 return "❌ Segment not found", self.get_segments_table(conv_id), ""
 
+            # Check if the value is already set to what we're trying to set it to
+            # This prevents unnecessary recalculations when just clicking on the segment
+            if segment.is_misidentified == is_misidentified:
+                # No change needed - just return current state
+                marker = "⚠️ " if segment.is_misidentified else ""
+                updated_info = f"Segment ID: {segment_id}\nSpeaker: {marker}{segment.speaker_name}\nTime: {segment.start_offset:.1f}s - {segment.end_offset:.1f}s"
+                return "", self.get_segments_table(conv_id), updated_info
+
             speaker_id = segment.speaker_id
             segment.is_misidentified = is_misidentified
             db.commit()
@@ -1723,6 +1743,9 @@ Buffer: {stats['buffer_chunks']} chunks
             db.commit()
 
             print(f"✓ Recalculated embedding for '{speaker.name}' using {len(embeddings)} non-misidentified segments")
+
+            # Clear GPU cache after all embedding extractions
+            self.engine.clear_gpu_cache()
 
         finally:
             if should_close:
