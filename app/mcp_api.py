@@ -286,6 +286,89 @@ async def delete_all_unknown_speakers(db: Session) -> dict:
     }
 
 
+async def search_conversations_by_speaker(speaker_name: str, db: Session, limit: int = 50, skip: int = 0) -> dict:
+    """
+    Search for all conversations where a specific speaker appears.
+
+    Useful for querying conversation history by speaker:
+    - "What was I talking about last week?"
+    - "Show me all conversations with Nick"
+    - "When did Andy last speak?"
+
+    Returns conversation IDs, titles, datetimes, durations, and segment counts.
+    Ordered by most recent first.
+
+    Args:
+        speaker_name: Name of speaker to search for (must exist in database)
+        limit: Maximum number of conversations to return (default: 50)
+        skip: Number of conversations to skip for pagination (default: 0)
+
+    Returns:
+        Dict with speaker info and list of conversations with metadata:
+        - conversation_id: ID for use in other tools
+        - title: Conversation title
+        - datetime: When conversation started (ISO format)
+        - duration_minutes: Length of conversation
+        - speaker_segments: Number of times this speaker spoke
+        - total_segments: Total segments in conversation
+
+    Raises:
+        Error if speaker doesn't exist in database
+    """
+    from .models import Speaker, Conversation, ConversationSegment
+    from sqlalchemy import func
+
+    # Validate speaker exists
+    speaker = db.query(Speaker).filter(Speaker.name == speaker_name).first()
+    if not speaker:
+        return {"error": f"Speaker '{speaker_name}' not found. Use list_speakers tool to see available speakers."}
+
+    # Get all distinct conversations where this speaker appears
+    # Join ConversationSegment with Conversation to get conversation details
+    conversations_query = (
+        db.query(Conversation)
+        .join(ConversationSegment, Conversation.id == ConversationSegment.conversation_id)
+        .filter(ConversationSegment.speaker_id == speaker.id)
+        .distinct()
+        .order_by(Conversation.start_time.desc())  # Most recent first
+    )
+
+    total_count = conversations_query.count()
+    conversations = conversations_query.offset(skip).limit(limit).all()
+
+    # Format results
+    conversation_list = []
+    for conv in conversations:
+        # Count segments by this speaker in this conversation
+        speaker_segment_count = (
+            db.query(func.count(ConversationSegment.id))
+            .filter(
+                ConversationSegment.conversation_id == conv.id,
+                ConversationSegment.speaker_id == speaker.id
+            )
+            .scalar()
+        )
+
+        conversation_list.append({
+            "conversation_id": conv.id,
+            "title": conv.title or f"Conversation {conv.id}",
+            "datetime": conv.start_time.isoformat() if conv.start_time else None,
+            "duration_seconds": conv.duration,
+            "duration_minutes": round(conv.duration / 60, 1) if conv.duration else None,
+            "total_segments": conv.num_segments,
+            "speaker_segments": speaker_segment_count,
+            "audio_path": conv.audio_path
+        })
+
+    return {
+        "speaker_name": speaker.name,
+        "speaker_id": speaker.id,
+        "total_conversations": total_count,
+        "returned_count": len(conversation_list),
+        "conversations": conversation_list
+    }
+
+
 # ============================================================================
 # Tool Registry
 # ============================================================================
@@ -340,6 +423,11 @@ TOOLS = {
         "function": update_conversation_title,
         "description": "Change conversation title/name. Returns: updated conversation. Params: conversation_id (from list_conversations), title (new title string).",
         "params": ["conversation_id", "title"]
+    },
+    "search_conversations_by_speaker": {
+        "function": search_conversations_by_speaker,
+        "description": "Search conversation history by speaker name. Returns all conversations where the speaker appears with IDs, titles, datetimes, and segment counts. Useful for queries like 'What was I talking about last week?' or 'Show me all conversations with Nick'. Returns error if speaker doesn't exist. Results ordered by most recent first. Params: speaker_name (required, must be valid speaker), limit (default 50), skip (default 0 for pagination).",
+        "params": ["speaker_name", "limit", "skip"]
     }
 }
 

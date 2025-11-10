@@ -860,6 +860,13 @@ Replace `10.x.x.x` with your server's IP address for network access (e.g., from 
 10. **update_conversation_title**(conversation_id, title)
    - Update conversation title
 
+11. **search_conversations_by_speaker**(speaker_name, limit=50, skip=0)
+   - Search conversation history by speaker name
+   - Returns all conversations where speaker appears with IDs, titles, datetimes, durations, segment counts
+   - Ordered by most recent first
+   - Use case: "What was I talking about with Nick last week?"
+   - Returns error if speaker doesn't exist
+
 **Example AI Agent Workflow:**
 
 ```python
@@ -907,6 +914,514 @@ requests.post(
     "http://localhost:8000/api/v1/conversations/123/segments/456/identify",
     params={"speaker_name": "Bob", "enroll": True}
 )
+```
+
+## AI Assistant Integration Examples
+
+This section shows how to build a conversational AI assistant that uses this speaker diarization system for continuous voice interaction with speaker memory.
+
+### Example Interaction Flow
+
+```
+[Unknown speaker detected in conversation]
+User: "Alright mate, how are you doing?"
+Friend: "Good mate, you?"
+
+AI Assistant: "Who are you speaking to?"
+User: "Oh, that's Nick"
+AI Assistant: "Oh hi Nick!"
+[Background: AI calls MCP tool to identify Unknown_17627242 as "Nick"]
+
+[Future conversations automatically recognize Nick]
+Nick: "Hey, remember what we discussed yesterday?"
+AI Assistant: "Yes Nick, you mentioned the project deadline..."
+```
+
+### Integration Architecture
+
+**How data flows:**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Your AI Assistant Application (you build this)         │
+│                                                          │
+│  [1] Continuous audio recording                         │
+│         ↓                                                │
+│  [2] POST audio → /api/v1/process-audio                 │
+│         ↓                                                │
+│  [3] Receive transcription response                     │
+│         ↓                                                │
+│  [4] Format to JSON & send to LLM                       │
+│         ↓                                                │
+│  [5] LLM responds (voice/text)                          │
+│                                                          │
+│  [6] When AI needs speaker info/history:                │
+│      LLM calls MCP tools (on-demand only!)              │
+│      - identify_unknown_speaker()                       │
+│      - get_conversation_transcript()                    │
+│      - update_speaker()                                 │
+└─────────────────────────────────────────────────────────┘
+              ↓ REST API (continuous)
+              ↓ MCP (on-demand)
+┌─────────────────────────────────────────────────────────┐
+│  MCP Speaker Diarization (this system)                  │
+│  - Processes audio                                       │
+│  - Identifies speakers                                   │
+│  - Returns transcriptions                                │
+│  - Stores conversation history                           │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Key point:**
+- **REST API** = continuous data flow (your app gets transcriptions)
+- **MCP** = tools AI calls only when needed (query history, update speakers)
+
+---
+
+### Implementation Guide
+
+#### 1. Continuous Recording & Transcription (Your App)
+
+**Your application sends audio to REST API:**
+
+```python
+# your_ai_app.py - Continuous recording loop
+
+import httpx
+import sounddevice as sd
+import numpy as np
+from datetime import datetime
+
+DIARIZATION_API = "http://localhost:8000/api/v1"
+
+async def record_and_process():
+    """Continuous recording, sends to diarization API"""
+
+    while True:
+        # Record audio chunk (e.g., 5 seconds)
+        audio = sd.rec(int(5 * 16000), samplerate=16000, channels=1)
+        sd.wait()
+
+        # Send to diarization API
+        files = {"file": ("audio.wav", audio.tobytes())}
+        data = {"enable_transcription": "true"}
+
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                f"{DIARIZATION_API}/process-audio",
+                files=files,
+                data=data
+            )
+
+        result = response.json()
+
+        # Process each segment returned
+        for segment in result.get("segments", []):
+            await handle_transcription(segment)
+```
+
+#### 2. Format Transcriptions for Your LLM
+
+**Convert API response to your LLM format:**
+
+```python
+# your_ai_app.py - Format for LLM
+
+async def handle_transcription(segment: dict):
+    """Format transcription and send to LLM"""
+
+    # Format as your structured JSON
+    message = {
+        "method": "voice",
+        "speaker": segment["speaker"],
+        "timestamp": segment["start_time"],  # or use current time
+        "content": segment.get("transcription", "")
+    }
+
+    # Example segment from API:
+    # {
+    #   "speaker": "Andy",
+    #   "start_time": "2025-11-09T12:43:00Z",
+    #   "transcription": "Hey, is anyone home?"
+    # }
+
+    # OR for unknown speaker:
+    # {
+    #   "speaker": "Unknown_17627242",
+    #   "start_time": "2025-11-09T12:45:00Z",
+    #   "transcription": "Good mate, you?"
+    # }
+
+    # Decide if this should go to AI
+    if await should_forward_to_ai(message):
+        await send_to_llm(message)
+    else:
+        # Store for potential later retrieval
+        await store_ambient_conversation(message)
+```
+
+#### 3. Intelligent Conversation Routing
+
+**Filter what goes to your main AI (saves cost/latency):**
+
+```python
+# your_ai_app.py - Conversation filter
+
+async def should_forward_to_ai(message: dict) -> bool:
+    """
+    Use small/fast LLM to detect if speech is directed at AI.
+    Only forwards AI-directed speech to main (expensive) LLM.
+    """
+
+    # Use lightweight model (GPT-3.5-turbo, Claude Haiku, etc.)
+    filter_prompt = f"""Is this person talking TO the AI assistant, or having a conversation with someone else?
+
+Speaker: {message['speaker']}
+Said: "{message['content']}"
+
+Reply with only: AI_DIRECTED or AMBIENT_CONVERSATION"""
+
+    result = await lightweight_llm.complete(filter_prompt)
+    return "AI_DIRECTED" in result
+
+async def send_to_llm(message: dict):
+    """Send to main AI for processing"""
+
+    # Your LLM conversation with system prompt
+    response = await main_llm.chat([
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": format_voice_message(message)}
+    ])
+
+    # Respond with voice/text
+    await respond(response)
+```
+
+#### 4. System Prompt for Unknown Speaker Handling
+
+**Add to your AI assistant's system prompt:**
+
+```python
+SYSTEM_PROMPT = """
+You are a helpful AI assistant with access to speaker diarization via MCP tools.
+
+When you detect an unknown speaker (speaker name starts with "Unknown_"):
+1. Ask the user who they are speaking to
+2. When the user identifies the speaker, call the identify_unknown_speaker MCP tool
+3. Greet the newly identified person naturally
+
+Example interaction:
+User says: "Oh, that's Nick"
+You should:
+- Call: identify_unknown_speaker(unknown_speaker_id="Unknown_17627242", real_name="Nick")
+- Respond: "Oh hi Nick! Nice to meet you."
+
+The system will automatically update all past segments from this unknown speaker.
+
+Available MCP tools for speaker management:
+- identify_unknown_speaker(unknown_speaker_id, real_name)
+- get_conversation_transcript(conversation_id)
+- update_speaker(speaker_id, new_name)
+- list_speakers()
+- delete_all_unknown_speakers()
+- search_conversations_by_speaker(speaker_name, limit, skip)
+
+Use these tools when users reference past conversations or update speaker identities.
+"""
+```
+
+#### 5. MCP Tool Calls (On-Demand Only)
+
+**When AI needs to query or update speaker data:**
+
+```python
+# your_ai_app.py - MCP client integration
+
+import httpx
+
+MCP_ENDPOINT = "http://localhost:8000/mcp"
+
+async def call_mcp_tool(tool_name: str, arguments: dict):
+    """Call MCP tool when AI needs it"""
+
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments
+        }
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(MCP_ENDPOINT, json=payload)
+
+    return response.json()
+
+# Example 1: User says "that's Nick"
+# Your LLM extracts the intent and calls:
+
+result = await call_mcp_tool(
+    "identify_unknown_speaker",
+    {
+        "unknown_speaker_id": "Unknown_17627242",
+        "real_name": "Nick"
+    }
+)
+# Response: "Updated speaker Unknown_17627242 to Nick. Updated 5 past segments."
+
+# Example 2: User says "what did Nick say about the meeting?"
+# Your LLM calls:
+
+result = await call_mcp_tool(
+    "get_conversation_transcript",
+    {
+        "conversation_id": "3",  # You track which conversation
+        "include_transcription": "true"
+    }
+)
+# Response: Full transcript with all segments, times, speakers
+```
+
+#### 6. Retroactive Context Retrieval
+
+**When user references past conversations:**
+
+```python
+# User says: "I was talking to you earlier about the project"
+
+# Your AI flow:
+# 1. LLM recognizes need for context
+# 2. Calls MCP to get recent conversation
+conversation = await call_mcp_tool(
+    "get_conversation_transcript",
+    {"conversation_id": recent_conversation_id}
+)
+
+# 3. Parse transcript and add to context
+for segment in conversation["segments"]:
+    if segment["speaker"] == "Andy":
+        context += f"{segment['speaker']}: {segment['transcription']}\n"
+
+# 4. Respond with full context
+# Now AI can answer: "You mentioned the deadline was Friday..."
+```
+
+#### 7. Conversational Speaker Updates
+
+**Complete example of the Nick conversation:**
+
+```python
+# Conversation flow in your app:
+
+# [Segment 1 arrives from REST API]
+{
+    "speaker": "Andy",
+    "transcription": "Alright mate, how are you doing?",
+    "start_time": "12:43:00"
+}
+→ Send to LLM (no response needed, not directed at AI)
+
+# [Segment 2 arrives]
+{
+    "speaker": "Unknown_17627242",
+    "transcription": "Good mate, you?",
+    "start_time": "12:43:05"
+}
+→ Send to LLM (triggers AI's unknown speaker protocol)
+→ AI responds: "Who are you speaking to?"
+
+# [Segment 3 arrives]
+{
+    "speaker": "Andy",
+    "transcription": "Oh, that's Nick",
+    "start_time": "12:43:10"
+}
+→ Send to LLM
+→ LLM extracts: speaker_id="Unknown_17627242", real_name="Nick"
+→ LLM calls MCP tool:
+await call_mcp_tool(
+    "identify_unknown_speaker",
+    {
+        "unknown_speaker_id": "Unknown_17627242",
+        "real_name": "Nick"
+    }
+)
+→ AI responds: "Oh hi Nick!"
+
+# [All future segments now show:]
+{
+    "speaker": "Nick",  # ← Updated automatically
+    "transcription": "...",
+}
+```
+
+---
+
+### Advanced: Visual Speaker Recognition
+
+**Extend your app with camera-based identification:**
+
+```python
+# your_ai_app.py - Add visual recognition
+
+async def handle_unknown_speaker(unknown_id: str):
+    """When unknown speaker detected, try visual identification"""
+
+    # 1. Trigger camera (USB webcam, IP camera, etc.)
+    photo = await camera.capture()
+
+    # 2. Send to vision LLM (runs separately, doesn't block main AI)
+    vision_result = await vision_llm.identify_face(photo)
+    # Example: {"name": "Nick", "confidence": 0.92}
+
+    # 3. If high confidence, auto-identify
+    if vision_result.confidence > 0.85:
+        await call_mcp_tool(
+            "identify_unknown_speaker",
+            {
+                "unknown_speaker_id": unknown_id,
+                "real_name": vision_result.name
+            }
+        )
+        await respond(f"Hi {vision_result.name}!")
+    else:
+        # Fall back to asking
+        await respond("Who are you speaking to?")
+
+# Security layer for sensitive commands
+async def verify_before_action(command: str, speaker: str):
+    """Visual verification before executing sensitive commands"""
+
+    if is_sensitive(command):
+        photo = await camera.capture()
+        person = await vision_llm.identify(photo)
+
+        if person.name == speaker and person.confidence > 0.95:
+            await execute_command(command)
+        else:
+            await respond("I need to visually verify it's you first")
+```
+
+---
+
+### What's Included vs. What You Build
+
+**✅ Included in this system:**
+- REST API endpoints for audio processing
+- Speaker enrollment and recognition
+- Audio transcription (faster-whisper)
+- Unknown speaker auto-clustering
+- Conversation storage and retrieval
+- MCP server with 10 tools for AI integration
+- Gradio web UI for speaker management
+
+**🔨 You build (your separate application):**
+- Continuous audio recording loop
+- REST API client (sends audio, receives transcriptions)
+- LLM integration (your choice: OpenAI, Anthropic, etc.)
+- Conversation routing/filtering logic
+- Voice output (TTS - text-to-speech)
+- MCP client (calls tools when AI needs them)
+- Camera integration (optional)
+- Visual recognition LLM (optional)
+- Your application-specific logic
+
+---
+
+### Example Use Cases
+
+**1. Smart Home Assistant**
+```
+Scenario: Household members interact naturally
+- Continuous recording in main living area
+- Recognizes family members by voice
+- Executes commands only from authorized speakers
+- Asks visitors to identify themselves first
+```
+
+**2. Personal AI Companion**
+```
+Scenario: Always-on conversational assistant
+- Records all conversations (with consent)
+- Maintains context across days/weeks
+- Remembers who said what and when
+- Can be queried: "What did Nick say about the project?"
+```
+
+**3. Meeting Room Assistant**
+```
+Scenario: Automated meeting transcription
+- Identifies all participants as they speak
+- Generates real-time transcript with speaker labels
+- Answers questions: "Who mentioned the deadline?"
+- Creates action items assigned to speakers
+```
+
+**4. Multi-User AI System**
+```
+Scenario: Personalized AI for each user
+- Switches personality/context based on speaker
+- Maintains separate conversation histories
+- Different permissions per user
+- Personalized responses and memory
+```
+
+---
+
+### Quick Start Integration
+
+```bash
+# 1. Start this diarization system
+./run_local.sh
+
+# 2. In your AI app, install client libraries
+pip install httpx sounddevice
+
+# 3. Create your AI application with structure above
+# your_ai_app/
+#   ├── main.py              # Continuous recording loop
+#   ├── mcp_client.py        # MCP tool calls
+#   ├── llm_integration.py   # Your LLM (OpenAI/Anthropic/etc)
+#   └── config.py            # API endpoints
+
+# 4. Run your application
+python your_ai_app/main.py
+```
+
+**Minimal working example:**
+
+```python
+# minimal_assistant.py
+
+import httpx
+import sounddevice as sd
+
+async def main():
+    while True:
+        # Record 5 seconds
+        audio = sd.rec(int(5 * 16000), samplerate=16000, channels=1)
+        sd.wait()
+
+        # Send to diarization
+        files = {"file": ("audio.wav", audio.tobytes())}
+        response = httpx.post(
+            "http://localhost:8000/api/v1/process-audio",
+            files=files,
+            data={"enable_transcription": "true"}
+        )
+
+        # Get transcription
+        for segment in response.json().get("segments", []):
+            message = {
+                "speaker": segment["speaker"],
+                "content": segment.get("transcription", "")
+            }
+
+            # Send to your LLM
+            llm_response = await your_llm.chat(message)
+            print(f"AI: {llm_response}")
 ```
 
 ## Advanced Features
@@ -1149,6 +1664,27 @@ This project builds upon exceptional open-source work:
 - **[Gradio](https://github.com/gradio-app/gradio)** - ML web interfaces made simple
 
 Thank you to these projects and their contributors for making this application possible.
+
+## Planned Features
+
+The following features are planned for future releases:
+
+### Automatic Conversation Summarization and Titling
+- AI-powered conversation summarization when recording finishes
+- Automatic title generation based on conversation content
+- Triggers when current conversation ends and new one begins
+- Replaces generic "Conversation 15" with meaningful titles like "Discussion about project deadline with Nick"
+- Helps with conversation discovery and context retrieval
+
+### Vector Database Search for Transcriptions
+- Store transcription text in a vector database for semantic search
+- Query conversations by topic or content, not just speaker
+- Each vector entry references conversation ID for easy retrieval
+- Enables long-term memory and contextual conversation lookup
+- Use cases:
+  - "What did we discuss about the budget last month?"
+  - "Find conversations where we talked about product features"
+  - "Show me all discussions related to the new project"
 
 ## Contributing
 
