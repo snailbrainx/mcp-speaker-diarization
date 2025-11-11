@@ -10,9 +10,6 @@ An all-in-one complete package combining GPU-accelerated speaker diarization and
 
 Example Next.js frontend interface (available at [github.com/snailbrainx/speaker_identity_nextjs](https://github.com/snailbrainx/speaker_identity_nextjs)):
 
-<details>
-<summary>Click to view screenshots</summary>
-
 <table>
   <tr>
     <td align="center">
@@ -55,8 +52,6 @@ Example Next.js frontend interface (available at [github.com/snailbrainx/speaker
     </td>
   </tr>
 </table>
-
-</details>
 
 ## What Makes This Different
 
