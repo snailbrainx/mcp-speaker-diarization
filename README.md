@@ -8,6 +8,8 @@ An all-in-one complete package combining GPU-accelerated speaker diarization and
 
 ## Screenshots
 
+Example Next.js frontend interface (available at [github.com/snailbrainx/speaker_identity_nextjs](https://github.com/snailbrainx/speaker_identity_nextjs)):
+
 <details>
 <summary>Click to view screenshots</summary>
 
@@ -15,49 +17,41 @@ An all-in-one complete package combining GPU-accelerated speaker diarization and
   <tr>
     <td align="center">
       <a href="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/1.png">
-        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/1.png" width="300" alt="Conversations Tab"/>
+        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/1.png" width="300" alt="Settings - Voice Profile Management"/>
       </a>
-      <br/>Conversations Tab
+      <br/>Settings - Voice Profile Management
     </td>
     <td align="center">
       <a href="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/2.png">
-        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/2.png" width="300" alt="Ground Truth Labeling"/>
+        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/2.png" width="300" alt="Process Audio - Upload Files"/>
       </a>
-      <br/>Ground Truth Labeling
+      <br/>Process Audio - Upload Files
     </td>
     <td align="center">
       <a href="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/3.png">
-        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/3.png" width="300" alt="Segment Audio Playback"/>
+        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/3.png" width="300" alt="Conversation Detail - Segments & Transcription"/>
       </a>
-      <br/>Segment Audio Playback
+      <br/>Conversation Detail - Segments & Transcription
     </td>
   </tr>
   <tr>
     <td align="center">
       <a href="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/4.png">
-        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/4.png" width="300" alt="Manage Speakers"/>
+        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/4.png" width="300" alt="Conversations List"/>
       </a>
-      <br/>Manage Speakers
+      <br/>Conversations List
     </td>
     <td align="center">
       <a href="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/5.png">
-        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/5.png" width="300" alt="Process Audio Tab"/>
+        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/5.png" width="300" alt="Speaker Management - Enroll & Manage"/>
       </a>
-      <br/>Process Audio Tab
+      <br/>Speaker Management - Enroll & Manage
     </td>
     <td align="center">
       <a href="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/6.png">
-        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/6.png" width="300" alt="Enroll Speaker"/>
+        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/6.png" width="300" alt="Live Recording - Real-time Transcription"/>
       </a>
-      <br/>Enroll Speaker
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <a href="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/7.png">
-        <img src="https://raw.githubusercontent.com/snailbrainx/mcp-speaker-diarization/master/screenshots/7.png" width="300" alt="Live Recording"/>
-      </a>
-      <br/>Live Recording
+      <br/>Live Recording - Real-time Transcription
     </td>
   </tr>
 </table>
@@ -84,7 +78,7 @@ While other projects combine pyannote.audio and faster-whisper for basic diariza
 ### Core Functionality
 - **Speaker Diarization**: Automatically detect "who spoke when" in audio recordings
 - **Speaker Recognition**: Enroll speakers once, recognize them in all future recordings
-- **Transcription**: Optional high-quality speech-to-text using faster-whisper (large-v3 model)
+- **Transcription**: Optional high-quality speech-to-text using faster-whisper (large-v3 model) with word-level confidence scores
 - **Live Recording**: Real-time streaming with voice activity detection and instant processing
 - **Unknown Speaker Handling**: Automatic clustering and enrollment of new speakers
 - **Conversation Management**: Organize recordings with speaker context and full transcripts
@@ -107,17 +101,20 @@ While other projects combine pyannote.audio and faster-whisper for basic diariza
 ## Use Cases
 
 - **AI Assistant Calls**: Enable AI agents to identify and remember multiple speakers across sessions
-- **Meeting Transcription**: Automatic speaker labeling for team meetings
+- **Meeting Transcription**: Automatic speaker labeling for team meetings with word-level confidence scores
+- **Subtitle Generation**: Create accurate subtitles for movies and TV shows with speaker identification
+- **Security & Authentication**: Voice identification at scale for security systems and access control
 - **Interview Processing**: Identify host vs. guests in podcasts and interviews
 - **Customer Support**: Separate agent and customer in support calls
 - **Research**: Analyze multi-party conversations with speaker attribution
+- **Agent Integration**: Seamless integration with AI agents via REST API and MCP server
 
 ## Technical Stack
 
 - **Diarization**: pyannote.audio 4.0.1 (`pyannote/speaker-diarization-community-1`)
 - **Embeddings**: pyannote.audio (`pyannote/embedding`)
-- **Transcription**: faster-whisper 1.2.1 (large-v3 model, CTranslate2 backend)
-- **Web Framework**: FastAPI 0.115.5 + Gradio 5.49.1
+- **Transcription**: faster-whisper 1.2.1 (configurable models: tiny/base/small/medium/large-v3, supports 99 languages, CTranslate2 backend)
+- **Backend API**: FastAPI 0.115.5 with WebSocket streaming support
 - **ML Framework**: PyTorch 2.5.1 with CUDA 12.4 support
 - **Database**: SQLAlchemy 2.0.36 with SQLite + Pydantic 2.11.0
 - **Audio Processing**: pydub, soundfile, ffmpeg
@@ -126,10 +123,16 @@ While other projects combine pyannote.audio and faster-whisper for basic diariza
 ## System Requirements
 
 ### Hardware
-- **GPU**: NVIDIA GPU with CUDA 12.x support (4GB+ VRAM recommended, 8GB+ for optimal performance)
+- **GPU**: NVIDIA GPU with CUDA 12.x support
   - **Tested on**: NVIDIA RTX 3090 (24GB VRAM) - excellent performance
-  - **Minimum**: 4GB VRAM for diarization + transcription
-  - **Works on**: Consumer GPUs (1080, 2080, 3060, 3090, 4080, 4090, etc.)
+  - **VRAM Requirements** (faster-whisper is very efficient):
+    - Diarization + embeddings: ~2-3GB base requirement
+    - **Whisper model adds** (choose based on available VRAM):
+      - `tiny`/`base`: ~400-500MB (total: ~3GB minimum)
+      - `small`: ~1GB (total: ~4GB recommended)
+      - `medium`: ~2GB (total: ~5GB recommended)
+      - `large-v3`: ~3-4GB (total: ~6-7GB recommended, default)
+  - **Works on**: Consumer GPUs (GTX 1060 6GB+, 1080, 2060, 3060, 3090, 4080, 4090, etc.)
 - **CPU Fallback**: Runs on CPU but significantly slower (GPU strongly recommended)
 - **RAM**: 8GB minimum, 16GB+ recommended
 - **Storage**: ~10GB for models, plus space for audio recordings
@@ -190,9 +193,11 @@ docker-compose logs -f
 ```
 
 **Access the application:**
-- Web UI: http://localhost:8000/gradio
 - API Documentation: http://localhost:8000/docs
 - API Endpoint: http://localhost:8000/api/v1
+- MCP Server: http://localhost:8000/mcp
+
+For a web interface, see the separate [Next.js frontend repository](https://github.com/snailbrainx/speaker_identity_nextjs).
 
 ### Option 2: Local Development (Python venv)
 
@@ -249,8 +254,7 @@ ssh -L 8000:localhost:8000 username@remote-server-ip
 
 **After connecting:**
 - Open browser on your Windows machine
-- Navigate to: `http://localhost:8000/gradio`
-- The web interface will load as if running locally
+- Navigate to: `http://localhost:8000/docs` (API documentation)
 
 ### SSH Tunnel (Linux/Mac)
 
@@ -258,7 +262,7 @@ ssh -L 8000:localhost:8000 username@remote-server-ip
 ssh -L 8000:localhost:8000 username@remote-server-ip
 ```
 
-Then access `http://localhost:8000/gradio` in your local browser.
+Then access API docs at `http://localhost:8000/docs`.
 
 ### Important Notes
 
@@ -286,8 +290,9 @@ DATABASE_URL=sqlite:////app/volumes/speakers.db
 
 # Speaker recognition threshold (0.0-1.0)
 # Lower = more strict, fewer false positives
-# Optimal: 0.20 (based on ground truth testing: 0 misidentifications + 50% matching)
-SPEAKER_THRESHOLD=0.20
+# Recommended: 0.30 for normal home usage (good balance of accuracy and matching)
+# Alternative: 0.20 for stricter matching with movie audio/background music
+SPEAKER_THRESHOLD=0.30
 
 # Context padding for embedding extraction (seconds)
 # Adds time before/after segment for robust embeddings
@@ -302,15 +307,34 @@ SILENCE_DURATION=0.5
 # Filter common Whisper hallucinations
 # Set to false if real speech is being filtered
 FILTER_HALLUCINATIONS=true
+
+# Whisper transcription model (faster-whisper with CTranslate2)
+# Choose based on GPU capabilities:
+# - tiny.en / tiny: ~400MB VRAM, fastest, lowest accuracy
+# - base.en / base: ~500MB VRAM, very fast, basic accuracy
+# - small.en / small: ~1GB VRAM, fast, good accuracy
+# - medium.en / medium: ~2GB VRAM, slower, better accuracy
+# - large-v3 / large-v2: ~3-4GB VRAM, slowest, best accuracy
+WHISPER_MODEL=large-v3
+
+# Whisper language setting
+# - "en" = English only (default, fastest)
+# - "auto" = Auto-detect language (99 languages supported)
+# - Or specify: "es", "fr", "de", "zh", "ja", etc.
+WHISPER_LANGUAGE=en
 ```
 
-### Optimal Settings
+### Recommended Settings
 
-These settings have been validated through ground truth testing on real audio with background music and effects:
+Default settings are optimized for normal home usage:
 
-- **SPEAKER_THRESHOLD=0.20**: Achieves zero misidentifications while maintaining 50% matching rate
-- **CONTEXT_PADDING=0.15**: Optimal for audio with background noise/music (67.4% matching, 3 misidentifications)
+- **SPEAKER_THRESHOLD=0.30**: Good balance of accuracy and matching for home conversations
+- **CONTEXT_PADDING=0.15**: Optimal for audio with background noise/music
 - **SILENCE_DURATION=0.5**: Balances responsiveness with complete sentence capture
+- **WHISPER_MODEL=large-v3**: Best accuracy, requires ~3-4GB VRAM. Use `small` (~1GB) or `base` (~500MB) for weaker GPUs.
+- **WHISPER_LANGUAGE=en**: English only (fastest). Use `auto` for multilingual auto-detection or specify language code.
+
+For stricter matching with movie audio or challenging conditions, reduce SPEAKER_THRESHOLD to 0.20.
 
 ## How It Works
 
@@ -404,12 +428,12 @@ These settings have been validated through ground truth testing on real audio wi
 5. **Speaker Matching**
    - Compare segment embedding to known speaker embeddings
    - **Cosine similarity** calculation (0.0-1.0)
-   - If similarity > threshold (0.20): Identified as known speaker
+   - If similarity > threshold (default 0.30): Identified as known speaker
    - If similarity ≤ threshold: Labeled as "Unknown_XX"
 
 6. **Unknown Speaker Handling**
    - **Embedding verification**: Check if multiple Unknown segments are the same person
-   - Group similar unknowns (same threshold: 0.20)
+   - Group similar unknowns (same threshold)
    - Each unique voice gets unique Unknown_XX identifier
    - Embeddings stored for future auto-enrollment
 
@@ -448,76 +472,19 @@ Two independent VAD systems work together:
 
 ### Web Interface
 
-#### 1. Enroll Speakers
+A modern Next.js web interface is available as a separate project with full voice management capabilities:
 
-Before processing recordings, enroll known speakers:
+**Repository:** https://github.com/snailbrainx/speaker_identity_nextjs
 
-1. Navigate to **"➕ Enroll Speaker"** tab
-2. Enter speaker name (e.g., "Alice")
-3. Provide voice sample (10-30 seconds recommended):
-   - Upload audio file, OR
-   - Click "Record" and speak
-4. Click **"Enroll Speaker"**
+**Features:**
+- Live recording with real-time transcription and speaker identification
+- Speaker enrollment and management
+- Conversation browsing with audio playback
+- Speaker identification and correction
+- Profile management and backup/restore
+- Ground truth labeling for testing
 
-**Tips:**
-- Clear audio with minimal background noise works best
-- Longer samples (20-30s) provide more robust embeddings
-- Multiple enrollments for same speaker will merge embeddings
-
-#### 2. Process Audio (Upload)
-
-1. Navigate to **"🎵 Process Audio"** tab
-2. Upload audio file or record
-3. Check **"Enable Transcription"** for text (optional, slower)
-4. Click **"Process Audio"**
-5. View results: Speaker segments with timestamps and confidence scores
-6. Find full conversation in **"💬 Conversations"** tab
-
-#### 3. Live Recording
-
-1. Navigate to **"🔴 Live Recording"** tab
-2. Click **"Start Recording"** (grant browser microphone permission)
-3. Speak naturally - watch VAD indicator for speech detection
-4. Monitor live stats: Audio level, segments queued/processed
-5. Click **"Stop Recording"** when finished
-6. Recording auto-processes and appears in Conversations
-
-**Live Recording Features:**
-- Real-time VAD indicator
-- Automatic silence detection
-- Parallel segment processing
-- Instant transcription updates
-- Auto-converts to MP3 for storage
-
-#### 4. Manage Conversations
-
-Navigate to **"💬 Conversations"** tab:
-
-**View Conversations:**
-- Select conversation from dropdown
-- View full transcript with speaker labels
-- Click segments to play audio
-- See confidence scores for identifications
-
-**Identify Unknown Speakers:**
-1. Select conversation with Unknown_XX speakers
-2. Find segment with unknown speaker
-3. Enter correct speaker name
-4. Check **"Auto-enroll if new speaker"** (creates speaker profile automatically)
-5. Click **"Identify Speaker in Segment"**
-6. All segments with same Unknown label update retroactively
-
-**Fix Misidentifications:**
-1. Select misidentified segment
-2. Check **"Mark as Misidentified"** checkbox
-3. Optionally provide correct speaker name
-4. Click **"Identify Speaker in Segment"**
-5. Speaker embeddings recalculate excluding misidentified segments
-
-**Other Actions:**
-- **Reprocess**: Re-run diarization with current speaker profiles
-- **Delete**: Remove conversation and associated audio
-- **Backup/Restore**: Export/import speaker profiles (JSON format)
+The frontend connects to this API backend and provides a complete user interface for all speaker diarization features. See the frontend repository for installation and usage instructions.
 
 ### REST API
 
@@ -540,6 +507,41 @@ Response:
   "speaker_count": 5,
   "conversation_count": 12
 }
+```
+
+---
+
+#### Settings Management
+
+**GET /settings/voice** - Get current voice processing settings
+```bash
+curl http://localhost:8000/api/v1/settings/voice
+```
+Response:
+```json
+{
+  "speaker_threshold": 0.30,
+  "context_padding": 0.15,
+  "silence_duration": 0.5,
+  "filter_hallucinations": true
+}
+```
+
+**POST /settings/voice** - Update voice processing settings
+```bash
+curl -X POST http://localhost:8000/api/v1/settings/voice \
+  -H "Content-Type: application/json" \
+  -d '{
+    "speaker_threshold": 0.25,
+    "context_padding": 0.15,
+    "silence_duration": 0.5,
+    "filter_hallucinations": true
+  }'
+```
+
+**POST /settings/voice/reset** - Reset settings to defaults
+```bash
+curl -X POST http://localhost:8000/api/v1/settings/voice/reset
 ```
 
 ---
@@ -659,6 +661,53 @@ Response:
   ]
 }
 ```
+
+---
+
+#### WebSocket Streaming
+
+**WS /streaming/ws** - Real-time audio streaming with live transcription
+
+WebSocket endpoint for browser-based live recording with real-time processing.
+
+**Protocol:**
+- Client → Server: Binary audio chunks (Float32Array)
+- Server → Client: JSON messages (status, segment, error, completed)
+
+**Usage:**
+```javascript
+// 1. Connect WebSocket
+const ws = new WebSocket('ws://localhost:8000/api/v1/streaming/ws');
+
+// 2. Send start message
+ws.send(JSON.stringify({ type: 'start' }));
+
+// 3. Stream audio chunks (48kHz, Float32)
+const mediaRecorder = new MediaRecorder(stream);
+mediaRecorder.ondataavailable = (e) => {
+  const arrayBuffer = await e.data.arrayBuffer();
+  const float32Array = new Float32Array(arrayBuffer);
+  ws.send(float32Array.buffer);
+};
+
+// 4. Receive real-time segments
+ws.onmessage = (event) => {
+  const data = JSON.parse(event.data);
+  if (data.type === 'segment') {
+    console.log(`${data.data.speaker_name}: ${data.data.text}`);
+  }
+};
+
+// 5. Stop recording
+ws.send(JSON.stringify({ type: 'stop' }));
+```
+
+**Message Types:**
+- `started` - Recording initiated, returns `conversation_id`
+- `status` - Real-time VAD status and audio level
+- `segment` - Completed segment with transcription and speaker
+- `completed` - Recording finished successfully
+- `error` - Processing error
 
 ---
 
@@ -797,6 +846,78 @@ Response:
   "space_saved_mb": 234.5
 }
 ```
+
+---
+
+#### Voice Profiles & Backup
+
+**GET /profiles/** - List all voice profiles
+```bash
+curl http://localhost:8000/api/v1/profiles/
+```
+
+**POST /profiles/** - Create new empty profile
+```bash
+curl -X POST http://localhost:8000/api/v1/profiles/ \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Home Profile", "description": "Family members"}'
+```
+
+**POST /profiles/duplicate** - Duplicate current state to new profile
+```bash
+curl -X POST http://localhost:8000/api/v1/profiles/duplicate \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Backup 2025-01", "description": "Monthly backup"}'
+```
+
+**PATCH /profiles/{profile_name}** - Update profile with current state
+```bash
+curl -X PATCH http://localhost:8000/api/v1/profiles/MyProfile \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Updated description"}'
+```
+
+**POST /profiles/restore** - Restore speakers and settings from profile
+```bash
+curl -X POST http://localhost:8000/api/v1/profiles/restore \
+  -H "Content-Type: application/json" \
+  -d '{"filename": "profile_Home_Profile.json"}'
+```
+
+**GET /profiles/download/{profile_name}** - Download profile as JSON
+```bash
+curl http://localhost:8000/api/v1/profiles/download/MyProfile > myprofile.json
+```
+
+**GET /profiles/download-all** - Download all profiles as ZIP
+```bash
+curl http://localhost:8000/api/v1/profiles/download-all > profiles.zip
+```
+
+**POST /profiles/import** - Import profile from JSON file
+```bash
+curl -X POST http://localhost:8000/api/v1/profiles/import \
+  -F "file=@myprofile.json"
+```
+
+**DELETE /profiles/{profile_name}** - Delete profile and checkpoints
+```bash
+curl -X DELETE http://localhost:8000/api/v1/profiles/MyProfile
+```
+
+**Checkpoint Management:**
+```bash
+# Create checkpoint snapshot
+curl -X POST http://localhost:8000/api/v1/profiles/MyProfile/checkpoints
+
+# List checkpoints
+curl http://localhost:8000/api/v1/profiles/MyProfile/checkpoints
+
+# Delete checkpoint
+curl -X DELETE http://localhost:8000/api/v1/profiles/MyProfile/checkpoints/20250109_143000
+```
+
+---
 
 #### AI Agent Integration
 
@@ -1315,7 +1436,6 @@ async def verify_before_action(command: str, speaker: str):
 - Unknown speaker auto-clustering
 - Conversation storage and retrieval
 - MCP server with 10 tools for AI integration
-- Gradio web UI for speaker management
 
 **🔨 You build (your separate application):**
 - Continuous audio recording loop
@@ -1575,13 +1695,13 @@ docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
 **Speaker not recognized**
 - Enrollment audio should be 10-30 seconds minimum
 - Use clear audio with minimal background noise
-- Check threshold: Lower = more strict (try 0.15-0.25 range)
+- Check threshold: Lower = more strict (try 0.20-0.35 range, default 0.30)
 - Re-enroll with better quality audio
 
 **"Audio file not found" errors**
 - Old uploads: Run `python scripts/migrate_temp_audio.py`
 - New uploads: Should auto-save to `data/recordings/`
-- Check `allowed_paths` in `app/main.py` (required for Gradio)
+- Verify `data/` directory is accessible
 
 **Whisper hallucinations ("thank you.", "thanks for watching")**
 - Already filtered via energy thresholding and text filtering
@@ -1605,27 +1725,16 @@ docker run --rm --gpus all nvidia/cuda:12.4.0-base-ubuntu22.04 nvidia-smi
 ### Audio Issues
 
 **No audio playback in UI**
-- Docker: Ensure `allowed_paths` set in `gr.mount_gradio_app()`
 - Check audio files exist: `ls data/recordings/`
+- Verify API endpoint returns audio: `/api/v1/conversations/segments/{id}/audio`
 - Check browser console for errors
-- Try different browser (tested: Chrome, Firefox)
+- Try different browser (tested: Chrome, Firefox, Safari)
 
 **Live recording not working**
 - Browser permission: Allow microphone access
 - Standalone: Install PortAudio: `sudo apt-get install portaudio19-dev`
 - Check browser microphone settings
 - Try different browser
-
-### Dependency Compatibility Issues
-
-**Gradio 500 Error: "TypeError: argument of type 'bool' is not iterable"**
-- **Cause**: Pydantic 2.12+ is incompatible with Gradio 5.x
-- **Solution**: Use Pydantic 2.11.0 (already set in requirements.txt)
-- **Check version**: `pip show pydantic`
-- **Fix if needed**: `pip install pydantic==2.11.0 --force-reinstall`
-- **Important**: Gradio 5.49.1 requires `pydantic>=2.0,<2.12` and MCP 1.21.0 requires `pydantic>=2.11.0`, so Pydantic 2.11.0 is the compatible version for both
-
-**Root Cause**: Pydantic 2.12+ changed JSON schema generation to use `additionalProperties: false` (boolean value), but Gradio's schema introspection code expects dictionary objects and attempts `if "const" in schema`, which fails when schema is a boolean.
 
 ## License
 
@@ -1639,8 +1748,8 @@ All major dependencies use permissive open-source licenses compatible with MIT:
   - Models require HuggingFace token and terms acceptance
   - Models themselves remain open-source and MIT licensed
 - **faster-whisper** (1.2.1): MIT License (SYSTRAN)
-- **Gradio** (5.49.1): Apache License 2.0
 - **FastAPI** (0.115.5): MIT License
+- **Next.js** (15.x): MIT License
 - **PyTorch** (2.5.1): BSD 3-Clause License
 - **SQLAlchemy** (2.0.36): MIT License
 - **Pydantic** (2.11.0): MIT License
@@ -1661,7 +1770,6 @@ This project builds upon exceptional open-source work:
 - **[faster-whisper](https://github.com/SYSTRAN/faster-whisper)** by SYSTRAN - Optimized Whisper implementation using CTranslate2
 - **[OpenAI Whisper](https://github.com/openai/whisper)** - Original speech recognition model
 - **[FastAPI](https://github.com/tiangolo/fastapi)** by Sebastián Ramírez - Modern web framework
-- **[Gradio](https://github.com/gradio-app/gradio)** - ML web interfaces made simple
 
 Thank you to these projects and their contributors for making this application possible.
 

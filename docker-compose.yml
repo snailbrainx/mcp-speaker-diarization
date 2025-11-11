@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   speaker-diarization:
     build: .
@@ -9,8 +7,14 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - DATABASE_URL=sqlite:////app/volumes/speakers.db
       - HF_TOKEN=${HF_TOKEN:-}
+      - SPEAKER_THRESHOLD=${SPEAKER_THRESHOLD:-0.30}
+      - CONTEXT_PADDING=${CONTEXT_PADDING:-0.15}
+      - SILENCE_DURATION=${SILENCE_DURATION:-0.5}
+      - FILTER_HALLUCINATIONS=${FILTER_HALLUCINATIONS:-true}
+      - WHISPER_MODEL=${WHISPER_MODEL:-large-v3}
+      - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
     ports:
-      - "8000:8000"  # FastAPI backend + Gradio (mounted at /gradio)
+      - "8000:8000"  # FastAPI backend API
     volumes:
       # Persistent storage for speaker database and embeddings
       - ./volumes:/app/volumes

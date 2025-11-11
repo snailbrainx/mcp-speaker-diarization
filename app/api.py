@@ -3,18 +3,20 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 import os
 import shutil
-from datetime import datetime
+from datetime import datetime, timedelta
+import json
 import torch
 from pydub import AudioSegment
 
 from .database import get_db
-from .models import Speaker, Recording, Segment
+from .models import Speaker, Recording, Segment, Conversation, ConversationSegment
 from .schemas import (
     SpeakerCreate, SpeakerResponse, SpeakerRename,
     RecordingResponse, SegmentResponse, DiarizationResult,
-    StatusResponse
+    StatusResponse, ConversationResponse
 )
 from .diarization import SpeakerRecognitionEngine
+from .config import get_config
 
 router = APIRouter()
 
@@ -152,25 +154,45 @@ async def delete_speaker(speaker_id: int, db: Session = Depends(get_db)):
     return {"message": f"Speaker '{speaker.name}' deleted successfully"}
 
 
-@router.post("/process", response_model=DiarizationResult)
+@router.delete("/speakers/unknown/all")
+async def delete_all_unknown_speakers(db: Session = Depends(get_db)):
+    """Delete all speakers with names starting with 'Unknown_'"""
+    unknown_speakers = db.query(Speaker).filter(
+        Speaker.name.like("Unknown_%")
+    ).all()
+
+    deleted_count = len(unknown_speakers)
+
+    for speaker in unknown_speakers:
+        db.delete(speaker)
+
+    db.commit()
+
+    return {
+        "message": f"Deleted {deleted_count} unknown speakers",
+        "deleted_count": deleted_count
+    }
+
+
+@router.post("/process", response_model=ConversationResponse)
 async def process_audio(
     audio_file: UploadFile = File(...),
+    enable_transcription: bool = Form(True),
     db: Session = Depends(get_db),
     engine: SpeakerRecognitionEngine = Depends(get_engine)
 ):
     """
-    Process audio file with speaker diarization and recognition
-
-    Args:
-        audio_file: Audio file to process
+    Process uploaded audio file with speaker diarization and recognition.
+    Creates a new Conversation with segments.
     """
     # Save audio file
     data_path = os.getenv("DATA_PATH", "/app/data")
     os.makedirs(f"{data_path}/recordings", exist_ok=True)
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
 
-    # Save uploaded file temporarily
-    temp_filename = f"{timestamp}_{audio_file.filename}"
+    # Save uploaded file with timestamp
+    base_filename = audio_file.filename or "upload"
+    temp_filename = f"uploaded_{timestamp}_{base_filename}"
     temp_path = f"{data_path}/recordings/{temp_filename}"
 
     with open(temp_path, "wb") as buffer:
@@ -180,81 +202,114 @@ async def process_audio(
     if not temp_path.endswith('.wav'):
         try:
             audio = AudioSegment.from_file(temp_path)
-            wav_filename = temp_filename.rsplit('.', 1)[0] + '_converted.wav'
+            wav_filename = temp_filename.rsplit('.', 1)[0] + '.wav'
             file_path = f"{data_path}/recordings/{wav_filename}"
             audio.export(file_path, format='wav')
-            filename = wav_filename
-            # Remove temp file after conversion
+            # Remove original after conversion
             os.remove(temp_path)
         except Exception as e:
             # If conversion fails, use original file
             print(f"Warning: Failed to convert to WAV: {e}")
             file_path = temp_path
-            filename = temp_filename
     else:
         file_path = temp_path
-        filename = temp_filename
 
-    # Create recording entry
-    recording = Recording(filename=filename, status="processing")
-    db.add(recording)
+    # Create conversation entry
+    start_time = datetime.utcnow()
+    conversation = Conversation(
+        title=f"Uploaded: {audio_file.filename}",
+        audio_path=file_path,
+        start_time=start_time,
+        status="processing"
+    )
+    db.add(conversation)
     db.commit()
-    db.refresh(recording)
+    db.refresh(conversation)
 
     try:
         # Get known speakers
         speakers = db.query(Speaker).all()
-        known_speakers = [
-            (s.id, s.name, s.get_embedding())
-            for s in speakers
-        ]
+        known_speakers = [(s.id, s.name, s.get_embedding()) for s in speakers]
 
-        # Process audio
-        result = engine.process_audio_with_recognition(
-            file_path,
-            known_speakers,
-            threshold=0.7
-        )
+        # Get threshold from config
+        config = get_config()
+        settings = config.get_settings()
+        threshold = settings.speaker_threshold
 
-        # Store segments
-        for seg_data in result["segments"]:
-            segment = Segment(
-                recording_id=recording.id,
-                speaker_id=seg_data.get("speaker_id"),
-                start_time=seg_data["start"],
-                end_time=seg_data["end"],
-                confidence=seg_data.get("confidence"),
-                speaker_label=seg_data["speaker_name"]
+        # Process audio with transcription
+        if enable_transcription:
+            result = engine.transcribe_with_diarization(
+                file_path,
+                known_speakers,
+                threshold=threshold
+            )
+        else:
+            result = engine.process_audio_with_recognition(
+                file_path,
+                known_speakers,
+                threshold=threshold
+            )
+
+        # Create conversation segments
+        for seg in result["segments"]:
+            # Determine speaker
+            speaker_id = None
+            speaker_name = seg["speaker"]
+            confidence = seg.get("confidence", 0.0)
+
+            if seg.get("is_known"):
+                # Find speaker by name
+                speaker = db.query(Speaker).filter(Speaker.name == speaker_name).first()
+                if speaker:
+                    speaker_id = speaker.id
+            else:
+                # Auto-enroll unknown speakers with embeddings (enables clustering)
+                embedding = seg.get("embedding")
+                if embedding is not None and speaker_name.startswith("Unknown_"):
+                    from .diarization import auto_enroll_unknown_speaker
+                    speaker_id, speaker_name = auto_enroll_unknown_speaker(
+                        embedding, db, threshold=threshold
+                    )
+                    # Update confidence since we're using the enrolled speaker
+                    confidence = 1.0 if speaker_id else confidence
+
+            # Serialize word-level data if available
+            words_json = json.dumps(seg["words"]) if seg.get("words") else None
+
+            segment = ConversationSegment(
+                conversation_id=conversation.id,
+                speaker_id=speaker_id,
+                speaker_name=speaker_name,
+                text=seg.get("text", ""),
+                start_time=start_time + timedelta(seconds=seg["start"]),
+                end_time=start_time + timedelta(seconds=seg["end"]),
+                start_offset=seg["start"],
+                end_offset=seg["end"],
+                confidence=confidence,
+                words_data=words_json,  # Include word-level confidence
+                avg_logprob=seg.get("avg_logprob")
             )
             db.add(segment)
 
-        # Update recording status
-        recording.status = "completed"
-        recording.duration = max(s["end"] for s in result["segments"])
-        db.commit()
-        db.refresh(recording)
+        # Update conversation metadata
+        conversation.status = "completed"
+        conversation.num_segments = len(result["segments"])
+        conversation.num_speakers = result["num_speakers"]
+        if result["segments"]:
+            conversation.duration = max(s["end"] for s in result["segments"])
+            conversation.end_time = start_time + timedelta(seconds=conversation.duration)
 
-        # Clear GPU cache after audio processing
+        db.commit()
+        db.refresh(conversation)
+
+        # Clear GPU cache after processing
         engine.clear_gpu_cache()
 
-        # Return result
-        return DiarizationResult(
-            recording_id=recording.id,
-            num_speakers=result["num_speakers"],
-            num_known=result["num_known"],
-            num_unknown=result["num_unknown"],
-            segments=[SegmentResponse(
-                id=s.id,
-                start_time=s.start_time,
-                end_time=s.end_time,
-                speaker_label=s.speaker_label,
-                speaker_id=s.speaker_id,
-                confidence=s.confidence
-            ) for s in recording.segments]
-        )
+        # Return conversation
+        return conversation
 
     except Exception as e:
-        recording.status = "failed"
+        conversation.status = "failed"
         db.commit()
         raise HTTPException(status_code=500, detail=str(e))
 

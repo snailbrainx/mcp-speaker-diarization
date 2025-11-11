@@ -13,6 +13,10 @@ venv/
 ENV/
 test_env/
 
+# Testing
+tests/
+.pytest_cache/
+
 # Logs
 *.log
 logs/
@@ -22,6 +26,8 @@ volumes/*
 !volumes/.gitkeep
 data/*
 !data/.gitkeep
+backups/*
+!backups/.gitkeep
 *.db
 *.sqlite
 *.wav
@@ -43,7 +49,5 @@ Thumbs.db
 # Docker
 .dockerignore
 
-# Pytest cache
-.pytest_cache/
-*.json
-/tests
+# Frontend (separate repository)
+anna-frontend/

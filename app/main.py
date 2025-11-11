@@ -1,15 +1,27 @@
+import warnings
+import os
+
+# Suppress harmless warnings for cleaner output
+os.environ["PYTHONWARNINGS"] = "ignore"
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*Lightning automatically upgraded.*")
+warnings.filterwarnings("ignore", message=".*TF32.*")
+warnings.filterwarnings("ignore", message=".*does not have many workers.*")
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
-import gradio as gr
-import os
+import torch
 
 from .database import init_db
-from .api import router
+from .api import router, get_engine
 from .conversation_api import router as conversation_router
 from .mcp_api import router as mcp_router
-from .gradio_ui import create_gradio_app
+from .settings_api import router as settings_router
+from .backup_api import router as profiles_router
+from .streaming_websocket import router as streaming_router
 
 
 @asynccontextmanager
@@ -26,6 +38,92 @@ async def lifespan(app: FastAPI):
     os.makedirs(f"{data_path}/recordings", exist_ok=True)
     os.makedirs(f"{data_path}/temp", exist_ok=True)
     os.makedirs(volumes_path, exist_ok=True)
+
+    # Preload AI models for faster first request
+    print("\n=== Preloading AI models ===")
+    engine = get_engine()
+
+    # Load models (this loads into CPU/RAM but may not allocate VRAM yet)
+    whisper = engine.whisper_model  # Loads Whisper
+    diarization = engine.diarization_pipeline  # Loads diarization
+    embedding = engine.embedding_model  # Loads embeddings
+
+    # Force VRAM allocation by running a warmup pass (only on GPU)
+    if torch.cuda.is_available():
+        print("Running GPU warmup to allocate VRAM...")
+        import tempfile
+        import wave
+        import numpy as np
+
+        # Create a longer test audio file (10 seconds with synthetic speech pattern)
+        # This ensures all model buffers and VRAM are fully allocated
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            test_audio_path = f.name
+            with wave.open(test_audio_path, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+
+                # Generate 10 seconds of synthetic audio with speech-like patterns
+                # This triggers VAD and allocates full model buffers
+                duration = 10  # seconds
+                samples = duration * 16000
+                t = np.linspace(0, duration, samples)
+
+                # Mix of frequencies to simulate speech (200-800 Hz range)
+                audio = np.zeros(samples)
+                audio += 0.3 * np.sin(2 * np.pi * 250 * t)  # Fundamental frequency
+                audio += 0.2 * np.sin(2 * np.pi * 500 * t)  # First harmonic
+                audio += 0.1 * np.sin(2 * np.pi * 750 * t)  # Second harmonic
+
+                # Add amplitude modulation to simulate speech envelope
+                envelope = 0.5 + 0.5 * np.sin(2 * np.pi * 3 * t)  # 3 Hz modulation
+                audio *= envelope
+
+                # Convert to int16
+                audio = (audio * 32767 * 0.5).astype(np.int16)
+                wf.writeframes(audio.tobytes())
+
+        try:
+            print(f"  - Created {duration}s test audio file")
+
+            # Create dummy speaker to exercise speaker matching code path
+            dummy_embedding = np.random.randn(512).astype(np.float32)
+            dummy_speakers = [(1, "Warmup", dummy_embedding)]
+
+            # Get threshold from settings
+            from .config import get_config
+            config = get_config()
+            settings = config.get_settings()
+
+            # Warmup: full pipeline with speaker matching
+            print("  - Warming up models (diarization, embedding, whisper, matching)...")
+            with torch.no_grad():
+                _ = engine.transcribe_with_diarization(
+                    test_audio_path,
+                    known_speakers=dummy_speakers,
+                    threshold=settings.speaker_threshold
+                )
+
+            print("GPU warmup complete")
+
+            # Print VRAM usage (current = after cleanup, peak = during processing)
+            if torch.cuda.is_available():
+                current_allocated = torch.cuda.memory_allocated() / 1024**3
+                peak_allocated = torch.cuda.max_memory_allocated() / 1024**3
+                reserved = torch.cuda.memory_reserved() / 1024**3
+                print(f"  - VRAM current: {current_allocated:.2f} GB (after cleanup)")
+                print(f"  - VRAM peak: {peak_allocated:.2f} GB (during processing)")
+                print(f"  - VRAM reserved: {reserved:.2f} GB")
+
+        except Exception as e:
+            print(f"Warmup error (non-critical): {e}")
+        finally:
+            # Clean up test file (os already imported at top)
+            if os.path.exists(test_audio_path):
+                os.unlink(test_audio_path)
+
+    print("=== All models loaded and ready! ===\n")
 
     yield
     # Cleanup on shutdown (if needed)
@@ -51,6 +149,9 @@ app.add_middleware(
 # Include API routers
 app.include_router(router, prefix="/api/v1", tags=["Speaker Diarization"])
 app.include_router(conversation_router, prefix="/api/v1")
+app.include_router(settings_router, prefix="/api/v1")
+app.include_router(profiles_router, prefix="/api/v1")  # Voice Profiles
+app.include_router(streaming_router, prefix="/api/v1")  # WebSocket streaming
 app.include_router(mcp_router)  # MCP at /mcp
 
 
@@ -60,29 +161,14 @@ async def root():
     return {
         "message": "Speaker Diarization API",
         "docs": "/docs",
-        "gradio_ui": "/gradio",
         "api": "/api/v1",
-        "mcp": "/mcp (AI agent interface - JSON-RPC)"
+        "mcp": "/mcp (AI agent interface - JSON-RPC)",
+        "frontend": "http://localhost:3000/voice (Next.js UI)"
     }
 
 
-# Create and mount Gradio app
-print("Initializing Gradio interface...")
-gradio_app = create_gradio_app()
-
-# Mount with allowed_paths so Gradio can serve audio files
-data_path = os.getenv("DATA_PATH", "./data")
-app = gr.mount_gradio_app(
-    app,
-    gradio_app,
-    path="/gradio",
-    allowed_paths=[data_path, "./data"]  # Allow serving from data directory
-)
-print(f"Gradio interface mounted at /gradio with file access to {data_path}")
-
-
 if __name__ == "__main__":
-    # Start FastAPI server with Gradio mounted
+    # Start FastAPI server
     print("Starting server...")
     uvicorn.run(
         app,

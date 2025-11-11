@@ -9,6 +9,92 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 from pydub import AudioSegment
 
+
+def auto_enroll_unknown_speaker(embedding: np.ndarray, db_session, threshold: float = 0.30):
+    """
+    Auto-enroll unknown speaker with timestamp-based naming and clustering.
+
+    CRITICAL: This is a FALLBACK for segments that didn't match in transcribe_with_diarization().
+    Checks ALL speakers (not just Unknown_*) with a slightly lower threshold as a second chance.
+    This prevents creating duplicate Unknown speakers for people who are already enrolled.
+
+    Args:
+        embedding: Numpy array of speaker embedding
+        db_session: SQLAlchemy database session
+        threshold: Similarity threshold from settings (will use threshold-0.05 as fallback)
+
+    Returns:
+        Tuple of (speaker_id, speaker_name) for the enrolled/matched speaker
+    """
+    from .models import Speaker
+
+    # FIRST: Check ALL speakers (including enrolled ones like "Bob", "Alice") as safety fallback
+    # Use slightly LOWER threshold (5% less) to catch borderline cases that transcribe_with_diarization missed
+    # This prevents creating duplicate Unknowns for people already in the database
+    fallback_threshold = max(threshold - 0.05, 0.20)  # At least 0.20 (20%)
+
+    all_speakers = db_session.query(Speaker).all()
+    best_match = None
+    best_similarity = 0.0
+    best_above_threshold = None
+
+    if all_speakers and embedding is not None:
+        print(f"  🔍 Auto-enroll fallback: Checking {len(all_speakers)} speakers (fallback threshold: {fallback_threshold:.2%})")
+
+        for speaker in all_speakers:
+            existing_embedding = speaker.get_embedding()
+
+            # Calculate cosine similarity
+            similarity = cosine_similarity(
+                embedding.reshape(1, -1),
+                existing_embedding.reshape(1, -1)
+            )[0][0]
+
+            # Track best overall (for logging)
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_match = speaker
+
+            # Track best above threshold (for matching)
+            if similarity > fallback_threshold and (best_above_threshold is None or similarity > best_similarity):
+                best_above_threshold = speaker
+                print(f"    → Match: '{speaker.name}' (similarity: {similarity:.2%})")
+
+    if best_above_threshold:
+        print(f"✓ Fallback match: Identified as '{best_above_threshold.name}' (similarity: {best_similarity:.2%}, fallback threshold: {fallback_threshold:.2%})")
+        return (best_above_threshold.id, best_above_threshold.name)
+    elif best_match:
+        print(f"  ℹ️ Best match was '{best_match.name}' with {best_similarity:.2%} (below fallback threshold {fallback_threshold:.2%})")
+
+    # No match found - create new Unknown speaker with timestamp
+    # Use microsecond precision for better uniqueness
+    max_attempts = 5
+    timestamp_name = None
+
+    for attempt in range(max_attempts):
+        timestamp_name = f"Unknown_{int(time.time() * 1000000)}"
+
+        # Check if name already exists in DB
+        existing = db_session.query(Speaker).filter(Speaker.name == timestamp_name).first()
+        if not existing:
+            break
+        time.sleep(0.001)  # Wait 1ms and try again
+    else:
+        # Fallback to UUID if all attempts fail
+        import uuid
+        timestamp_name = f"Unknown_{uuid.uuid4().hex[:12]}"
+
+    # Create new speaker with embedding
+    new_speaker = Speaker(name=timestamp_name)
+    new_speaker.set_embedding(embedding)
+    db_session.add(new_speaker)
+    db_session.flush()  # Get the ID without committing
+
+    print(f"✓ Auto-enrolled new speaker: {timestamp_name} (ID: {new_speaker.id})")
+
+    return (new_speaker.id, new_speaker.name)
+
+
 class SpeakerRecognitionEngine:
     """
     Speaker diarization and recognition engine using pyannote.audio
@@ -72,12 +158,14 @@ class SpeakerRecognitionEngine:
     def whisper_model(self):
         """Lazy load Whisper model"""
         if self._whisper_model is None:
-            print("Loading faster-whisper model (large-v3)...")
+            # Get model from environment variable (default: large-v3)
+            model_name = os.getenv("WHISPER_MODEL", "large-v3")
+            print(f"Loading faster-whisper model ({model_name})...")
             # Load faster-whisper model with FP16 for GPU acceleration
             device_name = "cuda" if torch.cuda.is_available() else "cpu"
             compute_type = "float16" if torch.cuda.is_available() else "int8"
-            self._whisper_model = WhisperModel("large-v3", device=device_name, compute_type=compute_type)
-            print(f"faster-whisper model loaded on {device_name} with {compute_type}")
+            self._whisper_model = WhisperModel(model_name, device=device_name, compute_type=compute_type)
+            print(f"faster-whisper model '{model_name}' loaded on {device_name} with {compute_type}")
         return self._whisper_model
 
     def transcribe(self, audio_file: str) -> List[Dict]:
@@ -91,13 +179,17 @@ class SpeakerRecognitionEngine:
             List of transcription segments with timestamps
         """
         print(f"Transcribing {audio_file}...")
-        # faster-whisper transcription
+        # Get language from environment variable (default: "en")
+        # Use "auto" for auto-detection, or specify language code (e.g., "es", "fr", "de")
+        language = os.getenv("WHISPER_LANGUAGE", "en")
+        # faster-whisper transcription with word-level timestamps and confidence
         segments_generator, info = self.whisper_model.transcribe(
             audio_file,
-            language="en",
+            language=None if language == "auto" else language,  # None = auto-detect
             task="transcribe",
             beam_size=5,
-            vad_filter=True  # Use VAD to filter out non-speech
+            vad_filter=True,  # Use VAD to filter out non-speech
+            word_timestamps=True  # Enable word-level timestamps and probabilities
         )
 
         print(f"Detected language: {info.language} (probability: {info.language_probability:.2f})")
@@ -105,10 +197,23 @@ class SpeakerRecognitionEngine:
         transcription_segments = []
         # Convert generator to list - transcription happens during iteration
         for segment in segments_generator:
+            # Extract word-level data if available
+            words_data = []
+            if hasattr(segment, 'words') and segment.words:
+                for word in segment.words:
+                    words_data.append({
+                        "word": word.word,
+                        "start": word.start,
+                        "end": word.end,
+                        "probability": word.probability  # Word-level confidence
+                    })
+
             transcription_segments.append({
                 "start": segment.start,
                 "end": segment.end,
-                "text": segment.text.strip()
+                "text": segment.text.strip(),
+                "words": words_data,  # Include word-level data with confidence
+                "avg_logprob": segment.avg_logprob  # Segment-level confidence indicator
             })
 
         return transcription_segments
@@ -262,14 +367,20 @@ class SpeakerRecognitionEngine:
             info = sf.info(audio_file)
             duration = info.duration
 
+            # MP3 files can have duration discrepancies between libraries
+            # Use more conservative margins for MP3 files (pyannote often sees slightly shorter duration)
+            # Measured discrepancy: ~23ms, using 50ms margin for safety (covers padding + discrepancy)
+            is_mp3 = audio_file.lower().endswith('.mp3')
+            safety_margin = 0.05 if is_mp3 else 0.01  # 50ms for MP3, 10ms for WAV
+
             # Add context padding for more reliable embeddings
             padded_start = start_time - context_padding
             padded_end = end_time + context_padding
 
-            # Clamp times to valid range - use more aggressive margins
+            # Clamp times to valid range - use aggressive margins for MP3
             # Pyannote sometimes fails with times too close to file boundaries
             start_time = max(0, min(padded_start, duration - 0.5))
-            end_time = min(padded_end, duration - 0.1)
+            end_time = min(padded_end, duration - safety_margin)
 
             # If start is beyond end after clamping, adjust start
             if start_time >= end_time:
@@ -278,14 +389,14 @@ class SpeakerRecognitionEngine:
             # Ensure segment is at least 0.1s
             if end_time - start_time < 0.1:
                 # Try to extend end
-                end_time = min(start_time + 0.1, duration - 0.1)
+                end_time = min(start_time + 0.1, duration - safety_margin)
                 # If still too short, move start back
                 if end_time - start_time < 0.1:
                     start_time = max(0, end_time - 0.1)
 
             # Final safety check - ensure we're well within bounds
-            if end_time > duration - 0.05:
-                end_time = duration - 0.05
+            if end_time > duration - safety_margin:
+                end_time = duration - safety_margin
                 if start_time >= end_time:
                     start_time = max(0, end_time - 0.5)
 
@@ -413,6 +524,10 @@ class SpeakerRecognitionEngine:
         print(f"Parallel processing completed in {elapsed:.2f}s")
 
         # Step 3: Match transcription segments to speakers
+        # Map diarization labels (SPEAKER_00, SPEAKER_01) to Unknown_XX
+        unknown_speaker_map = {}  # Maps SPEAKER_XX -> Unknown_YY
+        unknown_counter = 1
+
         transcribed_with_speakers = []
 
         for trans_seg in transcription_segments:
@@ -438,12 +553,12 @@ class SpeakerRecognitionEngine:
                         speaker_label = diar_seg["speaker"]
 
             # Try to match to known speaker if provided
-            speaker_name = speaker_label  # Default to diarization label
+            speaker_name = speaker_label  # Default to diarization label (will be converted to Unknown_XX)
             is_known = False
             confidence = 0.0
             embedding = None
 
-            # ALWAYS extract embeddings (needed for embedding verification in gradio_ui.py)
+            # ALWAYS extract embeddings (needed for embedding verification and speaker matching)
             # Check if segment is long enough for embedding extraction
             segment_duration = trans_seg["end"] - trans_seg["start"]
             if segment_duration < 0.5:
@@ -489,6 +604,14 @@ class SpeakerRecognitionEngine:
                     else:
                         raise
 
+            # If still not matched to known speaker (or embedding failed), map to Unknown_XX
+            if not is_known and speaker_label:
+                # Create consistent mapping from diarization label to Unknown_XX
+                if speaker_label not in unknown_speaker_map:
+                    unknown_speaker_map[speaker_label] = f"Unknown_{unknown_counter:02d}"
+                    unknown_counter += 1
+                speaker_name = unknown_speaker_map[speaker_label]
+
             transcribed_with_speakers.append({
                 "start": trans_seg["start"],
                 "end": trans_seg["end"],
@@ -497,7 +620,9 @@ class SpeakerRecognitionEngine:
                 "speaker_label": speaker_label,
                 "is_known": is_known,
                 "confidence": confidence,
-                "embedding": embedding  # Include embedding for unknown speakers
+                "embedding": embedding,  # Include embedding for unknown speakers
+                "words": trans_seg.get("words", []),  # Include word-level data
+                "avg_logprob": trans_seg.get("avg_logprob")  # Include segment confidence
             })
 
         return {

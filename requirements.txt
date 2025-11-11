@@ -20,9 +20,6 @@ soundfile
 sqlalchemy==2.0.36
 alembic==1.14.0
 
-# Web UI
-gradio==5.49.1
-
 # Utilities
 numpy>=2.0.0
 scikit-learn>=1.6.1

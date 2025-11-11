@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 import os
@@ -22,5 +22,33 @@ def get_db():
         db.close()
 
 def init_db():
-    """Initialize database tables"""
+    """Initialize database tables and add missing columns"""
+    # Create all tables
     Base.metadata.create_all(bind=engine)
+
+    # Add missing columns to existing tables (for upgrades)
+    inspector = inspect(engine)
+
+    # Check conversation_segments table for missing columns
+    if 'conversation_segments' in inspector.get_table_names():
+        existing_columns = [col['name'] for col in inspector.get_columns('conversation_segments')]
+
+        # Add words_data column if missing
+        if 'words_data' not in existing_columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE conversation_segments ADD COLUMN words_data TEXT"))
+                    conn.commit()
+                    print("✓ Added words_data column to conversation_segments")
+            except Exception as e:
+                print(f"Note: Could not add words_data column: {e}")
+
+        # Add avg_logprob column if missing
+        if 'avg_logprob' not in existing_columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE conversation_segments ADD COLUMN avg_logprob REAL"))
+                    conn.commit()
+                    print("✓ Added avg_logprob column to conversation_segments")
+            except Exception as e:
+                print(f"Note: Could not add avg_logprob column: {e}")

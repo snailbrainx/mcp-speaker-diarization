@@ -35,9 +35,15 @@ class StreamingRecorder:
         """
         self.sample_rate = sample_rate
         self.silence_threshold = silence_threshold
-        # Load silence duration from environment if not specified
+
+        # Load settings from config manager (which checks env vars and config file)
+        from .config import get_config
+        config = get_config()
+        settings = config.get_settings()
+
+        # Load silence duration from config if not specified
         if silence_duration is None:
-            silence_duration = float(os.getenv("SILENCE_DURATION", "0.5"))
+            silence_duration = settings.silence_duration
         self.silence_duration = silence_duration
 
         # State
@@ -49,6 +55,9 @@ class StreamingRecorder:
         self.last_speech_time = None
         self.chunk_count = 0
         self.speech_detected = False  # VAD state for UI display
+
+        # Track cumulative offset for segments
+        self.cumulative_offset = 0.0  # Total duration of all processed segments
 
         # Queue system
         self.segment_queue = queue.Queue()  # Segments waiting to be processed
@@ -72,6 +81,12 @@ class StreamingRecorder:
 
     def start_recording(self, conversation_id: int):
         """Start recording for a conversation"""
+        # Reload settings (in case they changed in UI)
+        from .config import get_config
+        config = get_config()
+        settings = config.get_settings()
+        self.silence_duration = settings.silence_duration
+
         self.is_recording = True
         self.conversation_id = conversation_id
         self.current_buffer = []
@@ -81,10 +96,11 @@ class StreamingRecorder:
         self.segments_processed = 0
         self.segments_queued = 0
         self.segment_paths = []
+        self.cumulative_offset = 0.0
 
         # Create directory for this conversation's segments
         os.makedirs(f"data/stream_segments/conv_{conversation_id}", exist_ok=True)
-        print(f"🎤 Streaming recorder started for conversation {conversation_id}")
+        print(f"🎤 Streaming recorder started for conversation {conversation_id} (silence: {self.silence_duration}s)")
 
     def stop_recording(self):
         """Stop recording and wait for processing to complete"""
@@ -152,8 +168,8 @@ class StreamingRecorder:
             self.speech_detected = False
             silence_elapsed = time.time() - self.last_speech_time
 
+            # Process segment after enough silence
             if silence_elapsed >= self.silence_duration and len(self.current_buffer) > 10:
-                # Enough silence - process this segment
                 self._queue_segment()
 
         return {
@@ -185,9 +201,8 @@ class StreamingRecorder:
             print(f"⚠️ Long segment detected: {duration:.1f}s - processing may take longer")
 
         # Check if segment has enough actual speech (not just silence)
-        # Calculate average energy across the segment
         avg_energy = np.sqrt(np.mean(segment_audio ** 2))
-        if avg_energy < self.silence_threshold * 2:  # Need at least 2x silence threshold
+        if avg_energy < self.silence_threshold * 2:
             print(f"⏭️ Skipping segment (mostly silence, energy: {avg_energy:.4f})")
             self.current_buffer = []
             return
@@ -210,18 +225,29 @@ class StreamingRecorder:
         # Track segment path for later concatenation
         self.segment_paths.append(segment_path)
 
+        # Calculate duration and offsets
+        duration = len(segment_audio) / self.sample_rate
+        start_offset = self.cumulative_offset
+        end_offset = self.cumulative_offset + duration
+
         # Queue for processing
         segment_info = {
             "id": segment_id,
             "path": segment_path,
+            "segment_file": segment_path,  # Also include for compatibility
             "conversation_id": self.conversation_id,
-            "duration": len(segment_audio) / self.sample_rate,
+            "duration": duration,
+            "start_offset": start_offset,
+            "end_offset": end_offset,
             "timestamp": datetime.now()
         }
 
         self.segment_queue.put(segment_info)
         self.total_segments += 1
         self.segments_queued += 1
+
+        # Update cumulative offset for next segment
+        self.cumulative_offset = end_offset
 
         # Submit to thread pool
         future = self.executor.submit(self._process_segment_worker, segment_info)
@@ -231,7 +257,7 @@ class StreamingRecorder:
         self.current_buffer = []
         self.last_speech_time = time.time()
 
-        print(f"📦 Queued segment {segment_id} ({segment_info['duration']:.1f}s) - Queue: {self.segment_queue.qsize()}")
+        print(f"📦 Queued segment {segment_id} ({duration:.1f}s, offset {start_offset:.1f}-{end_offset:.1f}s) - Queue: {self.segment_queue.qsize()}")
 
     def _process_segment_worker(self, segment_info: Dict):
         """

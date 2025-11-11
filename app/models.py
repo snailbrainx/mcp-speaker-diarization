@@ -102,6 +102,11 @@ class ConversationSegment(Base):
     segment_audio_path = Column(String, nullable=True)
 
     confidence = Column(Float, nullable=True)  # Speaker identification confidence
+
+    # Word-level transcription data with confidence scores (JSON)
+    words_data = Column(Text, nullable=True)  # Stores JSON array of {word, start, end, probability}
+    avg_logprob = Column(Float, nullable=True)  # Segment-level average log probability
+
     processed_at = Column(DateTime, default=datetime.utcnow)
 
     # Misidentification tracking
@@ -110,6 +115,17 @@ class ConversationSegment(Base):
     # Relationships
     conversation = relationship("Conversation", back_populates="transcript_segments")
     speaker = relationship("Speaker")
+
+    @property
+    def words(self):
+        """Parse words_data JSON and return as list"""
+        if self.words_data:
+            try:
+                import json
+                return json.loads(self.words_data)
+            except:
+                return None
+        return None
 
 
 class GroundTruthLabel(Base):
