@@ -165,10 +165,23 @@ async def rename_speaker(
 @router.delete("/speakers/{speaker_id}")
 async def delete_speaker(speaker_id: int, db: Session = Depends(get_db)):
     """Delete a speaker"""
+    from .models import SpeakerEmotionProfile, ConversationSegment
+
     speaker = db.query(Speaker).filter(Speaker.id == speaker_id).first()
     if not speaker:
         raise HTTPException(status_code=404, detail="Speaker not found")
 
+    # 1. Set speaker_id to NULL in segments (SQLite FK constraint is NO ACTION, not SET NULL)
+    db.query(ConversationSegment).filter(
+        ConversationSegment.speaker_id == speaker_id
+    ).update({"speaker_id": None}, synchronize_session=False)
+
+    # 2. Delete emotion profiles
+    db.query(SpeakerEmotionProfile).filter(
+        SpeakerEmotionProfile.speaker_id == speaker_id
+    ).delete(synchronize_session=False)
+
+    # 3. Delete speaker
     db.delete(speaker)
     db.commit()
 
@@ -178,12 +191,28 @@ async def delete_speaker(speaker_id: int, db: Session = Depends(get_db)):
 @router.delete("/speakers/unknown/all")
 async def delete_all_unknown_speakers(db: Session = Depends(get_db)):
     """Delete all speakers with names starting with 'Unknown_'"""
+    from .models import SpeakerEmotionProfile, ConversationSegment
+
     unknown_speakers = db.query(Speaker).filter(
         Speaker.name.like("Unknown_%")
     ).all()
 
     deleted_count = len(unknown_speakers)
+    speaker_ids = [s.id for s in unknown_speakers]
 
+    # 1. Set speaker_id to NULL in segments (SQLite FK constraint is NO ACTION, not SET NULL)
+    if speaker_ids:
+        db.query(ConversationSegment).filter(
+            ConversationSegment.speaker_id.in_(speaker_ids)
+        ).update({"speaker_id": None}, synchronize_session=False)
+
+    # 2. Delete emotion profiles
+    for speaker in unknown_speakers:
+        db.query(SpeakerEmotionProfile).filter(
+            SpeakerEmotionProfile.speaker_id == speaker.id
+        ).delete(synchronize_session=False)
+
+    # 3. Delete speakers
     for speaker in unknown_speakers:
         db.delete(speaker)
 
@@ -262,7 +291,8 @@ async def process_audio(
             result = engine.transcribe_with_diarization(
                 file_path,
                 known_speakers,
-                threshold=threshold
+                threshold=threshold,
+                db_session=db
             )
         else:
             result = engine.process_audio_with_recognition(
@@ -308,8 +338,6 @@ async def process_audio(
                 end_offset=seg["end"],
                 confidence=confidence,
                 emotion_category=seg.get("emotion_category"),
-                emotion_arousal=seg.get("emotion_arousal"),
-                emotion_valence=seg.get("emotion_valence"),
                 emotion_confidence=seg.get("emotion_confidence"),
                 words_data=words_json,  # Include word-level confidence
                 avg_logprob=seg.get("avg_logprob")

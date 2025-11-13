@@ -59,6 +59,7 @@ This combines pyannote.audio speaker diarization with faster-whisper transcripti
 
 - **Speaker Enrollment & Recognition**: Store speaker profiles, recognize them in future recordings
 - **Emotion Detection**: Real-time emotion recognition (angry, happy, sad, neutral, etc.) per speech segment
+- **Personalized Emotion Learning**: Learn speaker-specific emotion profiles from corrections, improving accuracy over time
 - **Unknown Speaker Auto-Clustering**: Automatically group unknown speakers, identify retroactively
 - **Embedding Management**: Continuous profile improvement through embedding merging
 - **Misidentification Correction**: Mark and fix incorrect identifications, recalculate embeddings
@@ -75,6 +76,7 @@ While other projects combine pyannote.audio and faster-whisper for basic diariza
 - **Speaker Diarization**: Automatically detect "who spoke when" in audio recordings
 - **Speaker Recognition**: Enroll speakers once, recognize them in all future recordings
 - **Emotion Detection**: Real-time emotion recognition using emotion2vec+ (ACL 2024) - detects angry, happy, sad, neutral, fearful, surprised, disgusted emotions per segment
+- **Personalized Emotion Learning**: Learn speaker-specific emotion profiles from corrections - system remembers how each person expresses emotions and improves accuracy over time
 - **Transcription**: Optional high-quality speech-to-text using faster-whisper (large-v3 model) with word-level confidence scores
 - **Live Recording**: Real-time streaming with voice activity detection and instant processing
 - **Unknown Speaker Handling**: Automatic clustering and enrollment of new speakers
@@ -125,19 +127,19 @@ Real-time emotion recognition for each speech segment using **emotion2vec+** (AC
 ### Features
 - **9 Emotion Categories**: angry, happy, sad, neutral, fearful, surprised, disgusted, other, unknown
 - **Per-Segment Analysis**: Emotion detected for each speaker turn
-- **Dimensional Mapping**: Automatic arousal/valence scores (0-1 scale)
 - **Confidence Scores**: Per-prediction confidence levels
 - **Real-Time Processing**: Works with both live recording and file upload
 - **API Integration**: All emotion data returned via REST API and WebSocket
+- **Personalized Learning**: Learn speaker-specific emotion patterns from corrections
 
 ### Supported Emotions
-- **angry**: High arousal, negative valence
-- **happy**: High arousal, positive valence
-- **sad**: Low arousal, negative valence
-- **neutral**: Mid arousal, mid valence
-- **fearful**: High arousal, negative valence
-- **surprised**: High arousal, mid-to-positive valence
-- **disgusted**: Mid-to-high arousal, negative valence
+- **angry**: Anger, frustration, annoyance
+- **happy**: Joy, excitement, contentment
+- **sad**: Sadness, disappointment, melancholy
+- **neutral**: Calm, emotionally neutral speech
+- **fearful**: Fear, anxiety, worry
+- **surprised**: Surprise, astonishment, shock
+- **disgusted**: Disgust, revulsion, distaste
 - **other**: Catch-all for ambiguous emotions
 - **unknown**: Unable to classify
 
@@ -148,9 +150,7 @@ Each conversation segment includes emotion fields:
   "speaker": "Andy",
   "transcription": "Hey, is anyone home?",
   "emotion_category": "happy",
-  "emotion_confidence": 0.87,
-  "emotion_arousal": 0.7,
-  "emotion_valence": 0.9
+  "emotion_confidence": 0.87
 }
 ```
 
@@ -491,6 +491,26 @@ For stricter matching with movie audio or challenging conditions, reduce SPEAKER
                                     │
                                     ▼
                         ┌───────────────────────┐
+                        │  Personalized         │
+                        │  Emotion Matching     │
+                        │  (if profiles exist)  │
+                        │                       │
+                        │  For known speakers:  │
+                        │  • Extract 1024-D     │
+                        │    emotion embedding  │
+                        │  • Compare to learned │
+                        │    emotion profiles   │
+                        │  • Cosine similarity  │
+                        │    (threshold: 0.6)   │
+                        │                       │
+                        │  If match found:      │
+                        │  Override base model  │
+                        │                       │
+                        │  ~5ms additional      │
+                        └───────────┬───────────┘
+                                    │
+                                    ▼
+                        ┌───────────────────────┐
                         │  Database Storage     │
                         │                       │
                         │  ConversationSegment: │
@@ -499,9 +519,9 @@ For stricter matching with movie audio or challenging conditions, reduce SPEAKER
                         │  • speaker_id         │
                         │  • confidence         │
                         │  • emotion_category   │
-                        │  • emotion_arousal    │
-                        │  • emotion_valence    │
                         │  • emotion_confidence │
+                        │  • emotion_corrected  │
+                        │  • emotion_misidentified│
                         │  • start/end times    │
                         │  • word-level data    │
                         └───────────┬───────────┘
@@ -520,18 +540,42 @@ For stricter matching with movie audio or challenging conditions, reduce SPEAKER
                                         │     Updates (all     │
                                         │     past segments)   │
                                         └──────────────────────┘
+                                                   │
+                                                   ▼
+                                        ┌──────────────────────┐
+                                        │  User Corrects       │
+                                        │  Emotion             │
+                                        │                      │
+                                        │  "Actually angry,    │
+                                        │   not neutral"       │
+                                        │                      │
+                                        │  → Extract 1024-D    │
+                                        │     emotion embedding│
+                                        │  → Merge into        │
+                                        │     SpeakerEmotion   │
+                                        │     Profile (weighted│
+                                        │     averaging)       │
+                                        │  → If changing       │
+                                        │     emotion: recalc  │
+                                        │     OLD profile too  │
+                                        │  → Reprocess applies │
+                                        │     personalized     │
+                                        │     matching         │
+                                        └──────────────────────┘
 ```
 
 **Key Points:**
 - **Parallel Processing**: Transcription (Whisper) and Diarization (Pyannote) run simultaneously using ThreadPoolExecutor, achieving ~50% speedup
-- **Processing Speed** (live recording): ~100ms total per segment on GPU
+- **Processing Speed** (live recording): ~105ms total per segment on GPU
   - Transcription + Diarization: ~40-100ms (parallel)
   - Alignment + Embedding + Matching: ~20-40ms
-  - Emotion Detection: ~30ms
+  - Base Emotion Detection: ~30ms
+  - Personalized Emotion Matching: ~5ms additional (if profiles exist)
   - Upload timing varies by file size (scales linearly with audio duration)
 - **Audio Conversion**: Automatic format conversion (MP3→WAV) before processing; live recording saves 48kHz chunks
-- **Sequential Operations**: Alignment → Embedding Extraction → Speaker Matching → Emotion Detection (in order)
-- **Emotion Detection**: Runs AFTER speaker identification, per segment, with automatic 16kHz resampling
+- **Sequential Operations**: Alignment → Embedding Extraction → Speaker Matching → Base Emotion Detection → Personalized Emotion Matching (in order)
+- **Emotion Detection**: Base model runs AFTER speaker identification, then personalized matching compares to learned profiles (if available)
+- **Personalized Learning**: User corrections extract 1024-D emotion embeddings, merge into speaker-specific profiles using weighted averaging; changing emotions recalculates BOTH old and new profiles
 - **Why Sequential?**: The real bottleneck (transcription + diarization) is already parallelized. Post-processing is fast enough that further parallelization would add complexity without meaningful speedup
 - **Sample Rates**: Browser (48kHz) → Whisper/Pyannote (auto-resample) → Emotion (16kHz) → Storage (MP3 192k)
 
@@ -943,6 +987,153 @@ Response:
   "speaker_created": true
 }
 ```
+
+---
+
+#### Emotion Detection & Learning
+
+**POST /conversations/{conversation_id}/segments/{segment_id}/correct-emotion** - Correct emotion and learn profile
+```bash
+# Correct emotion and learn from it
+curl -X POST "http://localhost:8000/api/v1/conversations/15/segments/234/correct-emotion?corrected_emotion=happy&learn=true"
+
+# Just correct without learning
+curl -X POST "http://localhost:8000/api/v1/conversations/15/segments/234/correct-emotion?corrected_emotion=neutral&learn=false"
+```
+Query parameters:
+- `corrected_emotion` (required): The correct emotion (angry, happy, sad, neutral, fearful, surprised, disgusted, other, unknown)
+- `learn` (optional): Whether to learn from this correction and update speaker's emotion profile (default: true)
+
+Response:
+```json
+{
+  "message": "Emotion corrected from 'angry' to 'neutral' (new emotion profile created)",
+  "old_emotion": "angry",
+  "new_emotion": "neutral",
+  "learned": true,
+  "sample_count": 1,
+  "speaker_name": "Alice"
+}
+```
+
+**Important**: Only correct emotions you're CERTAIN about. False corrections create false profiles that affect all future segments for that speaker.
+
+**Recalculation Behavior**: When changing a segment's emotion from one category to another (e.g., angry → neutral):
+- NEW emotion profile is updated to include this segment's embedding
+- OLD emotion profile is recalculated WITHOUT this segment's embedding
+- OLD profile is automatically deleted if no valid corrections remain
+- This mirrors speaker identification behavior and prevents orphaned embeddings
+
+**GET /speakers/{speaker_id}/emotion-profiles** - View learned emotion profiles
+```bash
+curl http://localhost:8000/api/v1/conversations/speakers/5/emotion-profiles
+```
+Response:
+```json
+{
+  "speaker_id": 5,
+  "speaker_name": "Alice",
+  "emotion_threshold": 0.7,
+  "profiles": [
+    {
+      "emotion_category": "happy",
+      "sample_count": 3,
+      "confidence_threshold": null,
+      "created_at": "2025-01-09T14:30:00",
+      "updated_at": "2025-01-09T15:45:00"
+    },
+    {
+      "emotion_category": "neutral",
+      "sample_count": 5,
+      "confidence_threshold": null,
+      "created_at": "2025-01-09T14:32:00",
+      "updated_at": "2025-01-09T16:10:00"
+    }
+  ]
+}
+```
+
+**DELETE /speakers/{speaker_id}/emotion-profiles** - Reset emotion profiles
+```bash
+# Reset specific emotion
+curl -X DELETE "http://localhost:8000/api/v1/conversations/speakers/5/emotion-profiles?emotion_category=angry"
+
+# Reset all emotions for speaker
+curl -X DELETE "http://localhost:8000/api/v1/conversations/speakers/5/emotion-profiles"
+```
+Query parameters:
+- `emotion_category` (optional): Specific emotion to reset. If omitted, resets all emotions for this speaker.
+
+Response:
+```json
+{
+  "message": "Reset emotion profile 'angry' for speaker 'Alice'",
+  "speaker_name": "Alice",
+  "emotion_category": "angry",
+  "deleted": 1
+}
+```
+
+**GET/PATCH /speakers/{speaker_id}/emotion-threshold** - Manage custom emotion threshold
+```bash
+# Get current threshold
+curl http://localhost:8000/api/v1/conversations/speakers/5/emotion-threshold
+
+# Set custom threshold (0.3-0.9 range)
+curl -X PATCH "http://localhost:8000/api/v1/conversations/speakers/5/emotion-threshold?threshold=0.8"
+```
+Query parameters (PATCH only):
+- `threshold` (required): Custom threshold for emotion matching (0.3-0.9). Higher = stricter matching.
+
+Response:
+```json
+{
+  "speaker_id": 5,
+  "speaker_name": "Alice",
+  "custom_threshold": 0.8,
+  "effective_threshold": 0.8,
+  "using_global": false
+}
+```
+
+**How Personalized Emotion Detection Works**:
+1. Base model detects emotions in all segments automatically
+2. When you correct a segment's emotion, system extracts 1024-D emotion embedding
+3. Embedding is stored/merged with speaker's emotion profile for that emotion
+4. Future segments compare to learned profiles using cosine similarity
+5. If match exceeds threshold (default 0.6), personalized emotion overrides base model
+6. Each correction improves the profile using weighted averaging
+
+**PATCH /conversations/{conversation_id}/segments/{segment_id}/emotion-misidentified** - Mark emotion correction as wrong and recalculate
+```bash
+# Mark correction as misidentified (recalculates profile without this segment)
+curl -X PATCH "http://localhost:8000/api/v1/conversations/15/segments/234/emotion-misidentified" \
+  -H "Content-Type: application/json" \
+  -d '{"is_misidentified": true}'
+
+# Unmark (include segment in profile again)
+curl -X PATCH "http://localhost:8000/api/v1/conversations/15/segments/234/emotion-misidentified" \
+  -H "Content-Type: application/json" \
+  -d '{"is_misidentified": false}'
+```
+Response:
+```json
+{
+  "message": "Emotion correction for segment 234 marked as misidentified",
+  "emotion_misidentified": true,
+  "emotion_profile_recalculated": true
+}
+```
+
+When you mark an emotion correction as misidentified:
+- System re-extracts embeddings from ALL non-misidentified corrections for that emotion
+- Recalculates the emotion profile by averaging the valid embeddings
+- If no valid corrections remain, automatically deletes the emotion profile
+- This mirrors the speaker misidentification behavior
+
+**Limitations**:
+- Only works for recognized speakers (not Unknown_*)
+- Requires accurate corrections - use misidentification feature to fix mistakes
 
 ---
 

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, LargeBinary, Text, Boolean
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, LargeBinary, Text, Boolean, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 from .database import Base
@@ -13,8 +13,12 @@ class Speaker(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    # Relationship to segments
+    # Per-speaker emotion matching threshold (NULL = use global default)
+    emotion_threshold = Column(Float, nullable=True)
+
+    # Relationships
     segments = relationship("Segment", back_populates="speaker")
+    emotion_profiles = relationship("SpeakerEmotionProfile", back_populates="speaker", cascade="all, delete-orphan")
 
     def get_embedding(self):
         """Convert binary embedding back to numpy array"""
@@ -23,6 +27,46 @@ class Speaker(Base):
 
     def set_embedding(self, embedding_array):
         """Convert numpy array to binary for storage"""
+        import numpy as np
+        self.embedding = embedding_array.astype(np.float32).tobytes()
+
+
+class SpeakerEmotionProfile(Base):
+    """
+    Emotion embeddings for a specific speaker and emotion category.
+    Stores learned emotional signatures that improve with corrections.
+    """
+    __tablename__ = "speaker_emotion_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    speaker_id = Column(Integer, ForeignKey("speakers.id", ondelete="CASCADE"), nullable=False)
+    emotion_category = Column(String, nullable=False)  # 'angry', 'happy', 'sad', etc.
+
+    # Emotion embedding (1024-D from emotion2vec)
+    embedding = Column(LargeBinary, nullable=False)  # Numpy array -> bytes
+
+    # Metadata
+    sample_count = Column(Integer, default=1)  # How many corrections went into this
+    confidence_threshold = Column(Float, nullable=True)  # Per-speaker-per-emotion threshold (NULL = use speaker/global)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Unique constraint: one profile per speaker per emotion
+    __table_args__ = (
+        UniqueConstraint('speaker_id', 'emotion_category', name='_speaker_emotion_uc'),
+    )
+
+    # Relationships
+    speaker = relationship("Speaker", back_populates="emotion_profiles")
+
+    def get_embedding(self):
+        """Convert binary embedding to numpy array"""
+        import numpy as np
+        return np.frombuffer(self.embedding, dtype=np.float32)
+
+    def set_embedding(self, embedding_array):
+        """Convert numpy array to binary"""
         import numpy as np
         self.embedding = embedding_array.astype(np.float32).tobytes()
 
@@ -105,9 +149,12 @@ class ConversationSegment(Base):
 
     # Emotion detection (from emotion2vec)
     emotion_category = Column(String, nullable=True)  # Primary emotion label (happy, sad, angry, etc.)
-    emotion_arousal = Column(Float, nullable=True)  # Arousal level (0-1, calm to excited)
-    emotion_valence = Column(Float, nullable=True)  # Valence (0-1, negative to positive)
     emotion_confidence = Column(Float, nullable=True)  # Confidence score for emotion prediction
+
+    # Emotion correction tracking (for personalized learning)
+    emotion_corrected = Column(Boolean, default=False, nullable=False)  # True if user manually corrected
+    emotion_corrected_at = Column(DateTime, nullable=True)  # When correction was made
+    emotion_misidentified = Column(Boolean, default=False, nullable=False)  # True if emotion correction was wrong (exclude from profile)
 
     # Word-level transcription data with confidence scores (JSON)
     words_data = Column(Text, nullable=True)  # Stores JSON array of {word, start, end, probability}

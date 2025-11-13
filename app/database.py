@@ -60,3 +60,45 @@ def init_db():
                     print("✓ Added avg_logprob column to conversation_segments")
             except Exception as e:
                 print(f"Note: Could not add avg_logprob column: {e}")
+
+        # Add emotion correction tracking columns if missing
+        if 'emotion_corrected' not in existing_columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE conversation_segments ADD COLUMN emotion_corrected INTEGER DEFAULT 0"))
+                    conn.commit()
+                    print("✓ Added emotion_corrected column to conversation_segments")
+            except Exception as e:
+                print(f"Note: Could not add emotion_corrected column: {e}")
+
+        if 'emotion_corrected_at' not in existing_columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE conversation_segments ADD COLUMN emotion_corrected_at TEXT"))
+                    conn.commit()
+                    print("✓ Added emotion_corrected_at column to conversation_segments")
+            except Exception as e:
+                print(f"Note: Could not add emotion_corrected_at column: {e}")
+
+        if 'emotion_misidentified' not in existing_columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE conversation_segments ADD COLUMN emotion_misidentified INTEGER DEFAULT 0"))
+                    conn.commit()
+                    print("✓ Added emotion_misidentified column to conversation_segments")
+            except Exception as e:
+                print(f"Note: Could not add emotion_misidentified column: {e}")
+
+    # Check speakers table for missing columns
+    if 'speakers' in inspector.get_table_names():
+        existing_columns = [col['name'] for col in inspector.get_columns('speakers')]
+
+        # Add emotion_threshold column if missing
+        if 'emotion_threshold' not in existing_columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE speakers ADD COLUMN emotion_threshold REAL"))
+                    conn.commit()
+                    print("✓ Added emotion_threshold column to speakers")
+            except Exception as e:
+                print(f"Note: Could not add emotion_threshold column: {e}")

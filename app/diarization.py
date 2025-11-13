@@ -359,6 +359,56 @@ class SpeakerRecognitionEngine:
 
         return best_match
 
+    def match_emotion_to_profile(
+        self,
+        emotion_embedding: np.ndarray,
+        speaker_emotion_profiles: List[Tuple[str, np.ndarray, Optional[float]]],
+        global_threshold: float = 0.6
+    ) -> Optional[Tuple[str, float]]:
+        """
+        Match emotion embedding to speaker's learned emotion profiles
+
+        Args:
+            emotion_embedding: Emotion embedding to match (1024-D from emotion2vec)
+            speaker_emotion_profiles: List of (emotion_category, profile_embedding, custom_threshold) tuples
+            global_threshold: Fallback threshold if profile has no custom threshold
+
+        Returns:
+            (emotion_category, confidence) or None if no match above threshold
+        """
+        if not speaker_emotion_profiles:
+            return None
+
+        # Validate emotion embedding
+        if np.isnan(emotion_embedding).any():
+            print(f"  ⚠️  Emotion embedding contains NaN - skipping personalized matching")
+            return None
+
+        best_match = None
+        best_similarity = 0.0
+
+        for emotion_cat, profile_emb, custom_threshold in speaker_emotion_profiles:
+            # Validate profile embedding
+            if np.isnan(profile_emb).any():
+                print(f"  ⚠️  Emotion profile '{emotion_cat}' contains NaN - skipping")
+                continue
+
+            # Use custom threshold if set, otherwise use global
+            threshold = custom_threshold if custom_threshold is not None else global_threshold
+
+            similarity = cosine_similarity(
+                emotion_embedding.reshape(1, -1),
+                profile_emb.reshape(1, -1)
+            )[0][0]
+
+            print(f"  Emotion similarity with '{emotion_cat}' profile: {similarity:.4f} (threshold: {threshold:.4f})")
+
+            if similarity > threshold and similarity > best_similarity:
+                best_similarity = similarity
+                best_match = (emotion_cat, float(similarity))
+
+        return best_match
+
     def extract_segment_embedding(
         self,
         audio_file: str,
@@ -382,74 +432,179 @@ class SpeakerRecognitionEngine:
             Segment embedding as numpy array
         """
         from pyannote.core import Segment
+        from pydub import AudioSegment as AudioSeg
         import soundfile as sf
 
-        # Use instance padding if not specified
-        if context_padding is None:
-            context_padding = self.context_padding
+        # Convert MP3 to WAV if needed for reliable processing (same as diarize function)
+        temp_wav_file = None
+        if audio_file.lower().endswith('.mp3'):
+            try:
+                print(f"🔄 Converting MP3 to WAV for embedding extraction: {audio_file}")
+                audio = AudioSeg.from_file(audio_file)
+                temp_wav_file = audio_file.rsplit('.', 1)[0] + '_temp_embed.wav'
+                audio.export(temp_wav_file, format='wav')
+                audio_file = temp_wav_file
+                print(f"✓ Conversion successful: {audio_file}")
+            except Exception as e:
+                print(f"Warning: Failed to convert MP3 to WAV: {e}")
+                # Continue with original MP3 file
 
-        # Get actual audio duration to prevent out-of-bounds
         try:
-            info = sf.info(audio_file)
-            duration = info.duration
+            # Use instance padding if not specified
+            if context_padding is None:
+                context_padding = self.context_padding
 
-            # MP3 files can have duration discrepancies between libraries
-            # Use more conservative margins for MP3 files (pyannote often sees slightly shorter duration)
-            # Measured discrepancy: ~23ms, using 50ms margin for safety (covers padding + discrepancy)
-            is_mp3 = audio_file.lower().endswith('.mp3')
-            safety_margin = 0.05 if is_mp3 else 0.01  # 50ms for MP3, 10ms for WAV
+            # Get actual audio duration to prevent out-of-bounds
+            try:
+                info = sf.info(audio_file)
+                duration = info.duration
 
-            # Add context padding for more reliable embeddings
-            padded_start = start_time - context_padding
-            padded_end = end_time + context_padding
+                # Add context padding for more reliable embeddings
+                padded_start = start_time - context_padding
+                padded_end = end_time + context_padding
 
-            # Clamp times to valid range - use aggressive margins for MP3
-            # Pyannote sometimes fails with times too close to file boundaries
-            start_time = max(0, min(padded_start, duration - 0.5))
-            end_time = min(padded_end, duration - safety_margin)
+                # Clamp times to valid range with small safety margin
+                start_time = max(0, min(padded_start, duration - 0.5))
+                end_time = min(padded_end, duration - 0.01)
 
-            # If start is beyond end after clamping, adjust start
-            if start_time >= end_time:
-                start_time = max(0, end_time - 0.5)
-
-            # Ensure segment is at least 0.1s
-            if end_time - start_time < 0.1:
-                # Try to extend end
-                end_time = min(start_time + 0.1, duration - safety_margin)
-                # If still too short, move start back
-                if end_time - start_time < 0.1:
-                    start_time = max(0, end_time - 0.1)
-
-            # Final safety check - ensure we're well within bounds
-            if end_time > duration - safety_margin:
-                end_time = duration - safety_margin
+                # If start is beyond end after clamping, adjust start
                 if start_time >= end_time:
                     start_time = max(0, end_time - 0.5)
 
-        except Exception as e:
-            print(f"Warning: Could not get audio duration, using original times: {e}")
-            # Reduce end time slightly as fallback
-            end_time = end_time - 0.1
+                # Ensure segment is at least 0.1s
+                if end_time - start_time < 0.1:
+                    end_time = min(start_time + 0.1, duration - 0.01)
+                    if end_time - start_time < 0.1:
+                        start_time = max(0, end_time - 0.1)
 
-        segment = Segment(start_time, end_time)
-        try:
+            except Exception as e:
+                print(f"Warning: Could not get audio duration, using original times: {e}")
+
+            segment = Segment(start_time, end_time)
             with torch.no_grad():
                 embedding = self.embedding_model.crop(audio_file, segment)
             return np.array(embedding)
-        except Exception as e:
-            # Pyannote can throw sample mismatch errors at file boundaries
-            error_msg = str(e)
-            if "samples instead of the expected" in error_msg or "requested chunk" in error_msg:
-                print(f"⚠️ Pyannote boundary error for {start_time:.2f}s-{end_time:.2f}s: {error_msg}")
-                raise RuntimeError(f"Segment {start_time:.2f}s-{end_time:.2f}s beyond file duration")
-            else:
-                raise
+
+        finally:
+            # Clean up temp WAV file if created
+            if temp_wav_file and os.path.exists(temp_wav_file):
+                try:
+                    os.remove(temp_wav_file)
+                    print(f"🗑️ Cleaned up temp WAV: {temp_wav_file}")
+                except:
+                    pass
+
+    def extract_segment_embeddings_batch(
+        self,
+        segments: list,
+        context_padding: float = None
+    ) -> list:
+        """
+        Extract embeddings for multiple segments efficiently with MP3→WAV caching
+
+        Prevents redundant conversions when multiple segments use the same audio file.
+        Essential for fast speaker embedding recalculation.
+
+        Args:
+            segments: List of dicts with keys: 'audio_file', 'start_time', 'end_time'
+            context_padding: Optional padding override (uses instance default if None)
+
+        Returns:
+            List of embeddings (numpy arrays) in same order as input segments
+            Skips segments that fail extraction (returns None in that position)
+        """
+        from pyannote.core import Segment
+        from pydub import AudioSegment as AudioSeg
+        import soundfile as sf
+
+        embeddings = []
+        wav_cache = {}  # Maps MP3 path → temp WAV path
+
+        try:
+            # Use instance padding if not specified
+            if context_padding is None:
+                context_padding = self.context_padding
+
+            # Pre-convert all unique MP3 files to WAV
+            unique_mp3s = set()
+            for seg in segments:
+                audio_file = seg['audio_file']
+                if audio_file.lower().endswith('.mp3'):
+                    unique_mp3s.add(audio_file)
+
+            for mp3_file in unique_mp3s:
+                try:
+                    audio = AudioSeg.from_file(mp3_file)
+                    temp_wav = mp3_file.rsplit('.', 1)[0] + '_temp_batch.wav'
+                    audio.export(temp_wav, format='wav')
+                    wav_cache[mp3_file] = temp_wav
+                    print(f"🔄 Batch converted: {os.path.basename(mp3_file)} → WAV (cached for reuse)")
+                except Exception as e:
+                    print(f"⚠️ Failed to convert {os.path.basename(mp3_file)}: {e}")
+                    # Continue without caching - will try with original MP3
+
+            # Extract embeddings using cached WAVs
+            for seg in segments:
+                audio_file = seg['audio_file']
+                start_time = seg['start_time']
+                end_time = seg['end_time']
+
+                # Use cached WAV if available
+                if audio_file in wav_cache:
+                    audio_file = wav_cache[audio_file]
+
+                try:
+                    # Get actual audio duration to prevent out-of-bounds
+                    info = sf.info(audio_file)
+                    duration = info.duration
+
+                    # Add context padding for more reliable embeddings
+                    padded_start = start_time - context_padding
+                    padded_end = end_time + context_padding
+
+                    # Clamp times to valid range with small safety margin
+                    start_time = max(0, min(padded_start, duration - 0.5))
+                    end_time = min(padded_end, duration - 0.01)
+
+                    # If start is beyond end after clamping, adjust start
+                    if start_time >= end_time:
+                        start_time = max(0, end_time - 0.5)
+
+                    # Ensure segment is at least 0.1s
+                    if end_time - start_time < 0.1:
+                        end_time = min(start_time + 0.1, duration - 0.01)
+                        if end_time - start_time < 0.1:
+                            start_time = max(0, end_time - 0.1)
+
+                    segment = Segment(start_time, end_time)
+                    with torch.no_grad():
+                        embedding = self.embedding_model.crop(audio_file, segment)
+                    embeddings.append(np.array(embedding))
+
+                except Exception as e:
+                    print(f"⚠️ Could not extract embedding from {os.path.basename(seg['audio_file'])}: {e}")
+                    embeddings.append(None)
+
+        finally:
+            # Clean up ALL temp WAV files
+            for temp_wav in wav_cache.values():
+                if os.path.exists(temp_wav):
+                    try:
+                        os.remove(temp_wav)
+                    except:
+                        pass
+
+            if wav_cache:
+                print(f"🗑️ Cleaned up {len(wav_cache)} temp WAV files")
+
+        return embeddings
 
     def extract_emotion(
         self,
         audio_file: str,
         start_time: Optional[float] = None,
-        end_time: Optional[float] = None
+        end_time: Optional[float] = None,
+        extract_embedding: bool = False
     ) -> Optional[Dict]:
         """
         Extract emotion from audio file or segment using emotion2vec via FunASR
@@ -458,14 +613,14 @@ class SpeakerRecognitionEngine:
             audio_file: Path to audio file
             start_time: Optional start time for segment (seconds)
             end_time: Optional end time for segment (seconds)
+            extract_embedding: If True, also extract emotion embedding (default: False)
 
         Returns:
             Dictionary with emotion data or None if extraction fails:
             {
                 'emotion_category': str,  # Primary emotion label
-                'emotion_arousal': float,  # 0-1
-                'emotion_valence': float,  # 0-1
-                'emotion_confidence': float  # 0-1
+                'emotion_confidence': float,  # 0-1
+                'embedding': np.ndarray  # 1024-D embedding (only if extract_embedding=True)
             }
         """
         if self.emotion_model is None:
@@ -501,7 +656,7 @@ class SpeakerRecognitionEngine:
                 result = self.emotion_model.generate(
                     temp_path,
                     granularity="utterance",
-                    extract_embedding=False
+                    extract_embedding=extract_embedding
                 )
 
                 # Clean up temp file
@@ -525,7 +680,7 @@ class SpeakerRecognitionEngine:
                     result = self.emotion_model.generate(
                         temp_path,
                         granularity="utterance",
-                        extract_embedding=False
+                        extract_embedding=extract_embedding
                     )
 
                     # Clean up
@@ -536,7 +691,7 @@ class SpeakerRecognitionEngine:
                     result = self.emotion_model.generate(
                         audio_file,
                         granularity="utterance",
-                        extract_embedding=False
+                        extract_embedding=extract_embedding
                     )
 
             # FunASR emotion2vec returns list of results
@@ -575,23 +730,23 @@ class SpeakerRecognitionEngine:
                     emotion_label = 'unknown'
                     max_score = 0.0
 
-                # Map emotion labels to arousal/valence (approximate mapping)
-                # emotion2vec supports: angry, disgusted, fearful, happy, neutral, other, sad, surprised, unknown
-                arousal_map = {
-                    'angry': 0.8, 'disgusted': 0.6, 'fearful': 0.7, 'happy': 0.7,
-                    'neutral': 0.5, 'sad': 0.3, 'surprised': 0.8, 'other': 0.5, 'unknown': 0.5
-                }
-                valence_map = {
-                    'angry': 0.2, 'disgusted': 0.2, 'fearful': 0.2, 'happy': 0.9,
-                    'neutral': 0.5, 'sad': 0.1, 'surprised': 0.6, 'other': 0.5, 'unknown': 0.5
-                }
-
-                return {
+                # Return emotion category and confidence
+                # Note: emotion2vec does NOT return arousal/valence - it only does categorical classification
+                emotion_data = {
                     'emotion_category': emotion_label,
-                    'emotion_arousal': arousal_map.get(emotion_label, 0.5),
-                    'emotion_valence': valence_map.get(emotion_label, 0.5),
                     'emotion_confidence': float(max_score)
                 }
+
+                # Extract embedding if requested
+                if extract_embedding and isinstance(res, dict):
+                    feats = res.get('feats')
+                    if feats is not None:
+                        import numpy as np
+                        # Convert to numpy array (1024-D from emotion2vec)
+                        embedding = np.array(feats, dtype=np.float32)
+                        emotion_data['embedding'] = embedding
+
+                return emotion_data
 
             return None
 
@@ -671,15 +826,17 @@ class SpeakerRecognitionEngine:
         self,
         audio_file: str,
         known_speakers: List[Tuple[int, str, np.ndarray]] = None,
-        threshold: float = 0.7
+        threshold: float = 0.7,
+        db_session = None
     ) -> Dict:
         """
-        Full pipeline: transcription + diarization + speaker recognition
+        Full pipeline: transcription + diarization + speaker recognition + personalized emotions
 
         Args:
             audio_file: Path to audio file
             known_speakers: Optional list of (id, name, embedding) tuples
             threshold: Similarity threshold for speaker matching
+            db_session: Optional database session for personalized emotion matching
 
         Returns:
             Dictionary with transcribed segments and speaker labels
@@ -794,12 +951,63 @@ class SpeakerRecognitionEngine:
                     unknown_counter += 1
                 speaker_name = unknown_speaker_map[speaker_label]
 
-            # Extract emotion for this segment
+            # Extract emotion for this segment (with embeddings for personalized matching)
+            # Feature flag for personalized emotions
+            ENABLE_PERSONALIZED_EMOTIONS = os.getenv("ENABLE_PERSONALIZED_EMOTIONS", "true").lower() == "true"
+
             emotion_data = self.extract_emotion(
                 audio_file,
                 trans_seg["start"],
-                trans_seg["end"]
+                trans_seg["end"],
+                extract_embedding=ENABLE_PERSONALIZED_EMOTIONS  # Extract embeddings if personalization enabled
             )
+
+            # Personalized emotion matching (if enabled and speaker has profiles)
+            if emotion_data and ENABLE_PERSONALIZED_EMOTIONS and is_known and db_session:
+                emotion_embedding = emotion_data.get('embedding')
+
+                if emotion_embedding is not None:
+                    try:
+                        # Import models here to avoid circular dependency
+                        from .models import Speaker, SpeakerEmotionProfile
+
+                        # Get speaker's emotion profiles
+                        speaker = db_session.query(Speaker).filter(Speaker.name == speaker_name).first()
+
+                        if speaker and speaker.emotion_profiles:
+                            # Build profile list: (emotion_category, embedding, custom_threshold)
+                            profiles = []
+                            for prof in speaker.emotion_profiles:
+                                profiles.append((
+                                    prof.emotion_category,
+                                    prof.get_embedding(),
+                                    prof.confidence_threshold  # Can be None
+                                ))
+
+                            # Get global emotion threshold
+                            from .config import get_config
+                            global_threshold = get_config().get_settings().emotion_threshold
+
+                            # Try to match to speaker's learned emotions
+                            match = self.match_emotion_to_profile(
+                                emotion_embedding,
+                                profiles,
+                                global_threshold
+                            )
+
+                            if match:
+                                matched_emotion, personalized_confidence = match
+                                print(f"  ✓ Personalized emotion match: {matched_emotion} ({personalized_confidence:.2%})")
+                                # Use personalized result
+                                emotion_data['emotion_category'] = matched_emotion
+                                emotion_data['emotion_confidence'] = personalized_confidence
+                            else:
+                                print(f"  No personalized emotion match - using generic detection")
+                                # Keep generic emotion2vec result
+
+                    except Exception as e:
+                        print(f"  Warning: Personalized emotion matching failed: {e}")
+                        # Fall back to generic emotion detection
 
             segment_data = {
                 "start": trans_seg["start"],
@@ -814,14 +1022,13 @@ class SpeakerRecognitionEngine:
                 "avg_logprob": trans_seg.get("avg_logprob")  # Include segment confidence
             }
 
-            # Add emotion data if available
+            # Add emotion data if available (remove embedding before storing)
             if emotion_data:
                 segment_data.update({
                     "emotion_category": emotion_data.get("emotion_category"),
-                    "emotion_arousal": emotion_data.get("emotion_arousal"),
-                    "emotion_valence": emotion_data.get("emotion_valence"),
                     "emotion_confidence": emotion_data.get("emotion_confidence")
                 })
+                # Don't include 'embedding' in segment_data (only used for matching)
 
             transcribed_with_speakers.append(segment_data)
 

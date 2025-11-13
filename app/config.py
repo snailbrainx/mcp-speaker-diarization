@@ -14,6 +14,7 @@ class VoiceSettings(BaseModel):
     context_padding: float = Field(default=0.15, ge=0.05, le=2.0, description="Context padding for embeddings (seconds)")
     silence_duration: float = Field(default=0.5, ge=0.1, le=5.0, description="Silence duration for streaming (seconds)")
     filter_hallucinations: bool = Field(default=True, description="Filter common Whisper hallucinations")
+    emotion_threshold: float = Field(default=0.6, ge=0.3, le=0.9, description="Global emotion matching threshold (0.3-0.9)")
 
 
 class ConfigManager:
@@ -50,6 +51,8 @@ class ConfigManager:
             settings_dict["silence_duration"] = float(os.getenv("SILENCE_DURATION"))
         if os.getenv("FILTER_HALLUCINATIONS"):
             settings_dict["filter_hallucinations"] = os.getenv("FILTER_HALLUCINATIONS").lower() == "true"
+        if os.getenv("EMOTION_THRESHOLD"):
+            settings_dict["emotion_threshold"] = float(os.getenv("EMOTION_THRESHOLD"))
 
         return VoiceSettings(**settings_dict)
 

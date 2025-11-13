@@ -14,7 +14,7 @@ import io
 from datetime import datetime
 
 from .database import get_db
-from .models import Speaker, ConversationSegment
+from .models import Speaker, ConversationSegment, SpeakerEmotionProfile
 
 router = APIRouter(prefix="/profiles", tags=["Voice Profiles"])
 
@@ -58,19 +58,33 @@ def save_current_state(profile_name: str, description: str, db: Session):
             "context_padding": settings.context_padding,
             "silence_duration": settings.silence_duration,
             "filter_hallucinations": settings.filter_hallucinations,
+            "emotion_threshold": settings.emotion_threshold,
         },
         "speakers": [],
         "segments": []
     }
 
-    # Export all speakers with embeddings
+    # Export all speakers with embeddings and emotion profiles
     speakers = db.query(Speaker).all()
     for speaker in speakers:
         embedding = speaker.get_embedding()
+
+        # Export emotion profiles for this speaker
+        emotion_profiles = []
+        for prof in speaker.emotion_profiles:
+            emotion_profiles.append({
+                "emotion_category": prof.emotion_category,
+                "embedding": prof.get_embedding().tolist(),
+                "sample_count": prof.sample_count,
+                "confidence_threshold": prof.confidence_threshold
+            })
+
         profile_data["speakers"].append({
             "id": speaker.id,
             "name": speaker.name,
-            "embedding": embedding.tolist() if embedding is not None else None
+            "embedding": embedding.tolist() if embedding is not None else None,
+            "emotion_threshold": speaker.emotion_threshold,
+            "emotion_profiles": emotion_profiles
         })
 
     # Export all segment assignments
@@ -403,6 +417,7 @@ async def restore_from_file(filename: str, db: Session = Depends(get_db)):
                 "context_padding": 0.15,
                 "silence_duration": 0.5,
                 "filter_hallucinations": True,
+                "emotion_threshold": 0.6,
             }
             # Override with values from profile
             settings_to_restore.update(data["settings"])
@@ -426,12 +441,30 @@ async def restore_from_file(filename: str, db: Session = Depends(get_db)):
 
             # Create speaker (all were deleted above)
             speaker = Speaker(name=speaker_data["name"])
-            if speaker_data["embedding"]:
+            if speaker_data.get("embedding"):
                 embedding = np.array(speaker_data["embedding"], dtype=np.float32)
                 speaker.set_embedding(embedding)
+
+            # Restore emotion threshold if present
+            speaker.emotion_threshold = speaker_data.get("emotion_threshold")
+
             db.add(speaker)
             db.flush()
             speaker_id_map[old_id] = speaker.id
+
+            # Restore emotion profiles for this speaker
+            for prof_data in speaker_data.get("emotion_profiles", []):
+                profile = SpeakerEmotionProfile(
+                    speaker_id=speaker.id,
+                    emotion_category=prof_data["emotion_category"],
+                    sample_count=prof_data.get("sample_count", 1),
+                    confidence_threshold=prof_data.get("confidence_threshold")
+                )
+                if prof_data.get("embedding"):
+                    emb = np.array(prof_data["embedding"], dtype=np.float32)
+                    profile.set_embedding(emb)
+                db.add(profile)
+
             speakers_restored += 1
 
         db.commit()

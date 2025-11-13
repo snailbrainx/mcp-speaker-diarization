@@ -238,7 +238,8 @@ async def _handle_segment_processed(
         result = engine.transcribe_with_diarization(
             segment_file,
             known_speakers,
-            threshold=threshold
+            threshold=threshold,
+            db_session=db
         )
 
         # Save segments to database
@@ -286,8 +287,6 @@ async def _handle_segment_processed(
                 end_offset=seg_end_offset,
                 confidence=confidence,
                 emotion_category=seg.get("emotion_category"),
-                emotion_arousal=seg.get("emotion_arousal"),
-                emotion_valence=seg.get("emotion_valence"),
                 emotion_confidence=seg.get("emotion_confidence"),
                 segment_audio_path=segment_file,
                 words_data=words_json,
@@ -304,8 +303,6 @@ async def _handle_segment_processed(
                 "end_offset": seg_end_offset,
                 "confidence": confidence,
                 "emotion_category": seg.get("emotion_category"),
-                "emotion_arousal": seg.get("emotion_arousal"),
-                "emotion_valence": seg.get("emotion_valence"),
                 "emotion_confidence": seg.get("emotion_confidence"),
                 "is_known": seg.get("is_known", False),
                 "words": seg.get("words", []),  # Include word-level data

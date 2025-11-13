@@ -262,7 +262,7 @@ async def delete_all_unknown_speakers(db: Session) -> dict:
     Useful for cleanup after identifying all speakers in conversations.
     Returns count of deleted speakers.
     """
-    from .models import Speaker
+    from .models import Speaker, SpeakerEmotionProfile, ConversationSegment
 
     unknown_speakers = db.query(Speaker).filter(Speaker.name.like("Unknown_%")).all()
 
@@ -271,7 +271,21 @@ async def delete_all_unknown_speakers(db: Session) -> dict:
 
     count = len(unknown_speakers)
     names = [s.name for s in unknown_speakers]
+    speaker_ids = [s.id for s in unknown_speakers]
 
+    # 1. Set speaker_id to NULL in segments (SQLite FK constraint is NO ACTION, not SET NULL)
+    if speaker_ids:
+        db.query(ConversationSegment).filter(
+            ConversationSegment.speaker_id.in_(speaker_ids)
+        ).update({"speaker_id": None}, synchronize_session=False)
+
+    # 2. Delete emotion profiles
+    for speaker in unknown_speakers:
+        db.query(SpeakerEmotionProfile).filter(
+            SpeakerEmotionProfile.speaker_id == speaker.id
+        ).delete(synchronize_session=False)
+
+    # 3. Delete speakers
     for speaker in unknown_speakers:
         db.delete(speaker)
 
