@@ -382,68 +382,151 @@ For stricter matching with movie audio or challenging conditions, reduce SPEAKER
 ### Architecture Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        User Input                            │
-│              (Upload Audio / Live Recording)                 │
-└────────────────────────┬────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                          User Input                              │
+│                (Upload Audio / Live Recording)                   │
+└──────────────────────────┬───────────────────────────────────────┘
+                           │
+                           ▼
+               ┌───────────────────────┐
+               │  Audio Format         │
+               │  Conversion           │
+               │  (if needed)          │
+               │                       │
+               │  MP3/M4A → WAV        │
+               │  Live: 48kHz chunks   │
+               └───────────┬───────────┘
+                           │
+            ╔══════════════╧════════════════╗
+            ║  PARALLEL PROCESSING          ║  ← ~50% faster!
+            ║  ThreadPoolExecutor           ║     Both run
+            ║  (2 workers)                  ║     simultaneously
+            ╚══════════════╤════════════════╝
+                           │
+         ┌─────────────────┴─────────────────┐
+         │                                   │
+         ▼                                   ▼
+┌────────────────────┐           ┌───────────────────────┐
+│  Transcription     │           │  Diarization          │
+│  (faster-whisper)  │           │  (pyannote.audio)     │
+│                    │           │                       │
+│  "What was said"   │           │  "Who spoke when"     │
+│                    │           │                       │
+│  • Speech → Text   │           │  • Detect speaker     │
+│  • Word timestamps │           │    turns              │
+│  • Confidence      │           │  • Assign labels      │
+│    scores          │           │    (SPEAKER_00, etc.) │
+│  • VAD filtering   │           │  • Time boundaries    │
+│                    │           │                       │
+│  ~2-10 seconds     │           │  ~2-10 seconds        │
+└─────────┬──────────┘           └───────────┬───────────┘
+          │                                  │
+          └──────────────┬───────────────────┘
+                         │
+                         ▼
+             ┌───────────────────────┐
+             │  Segment Alignment    │
+             │                       │
+             │  Match transcription  │
+             │  to speaker labels    │
+             │  by timestamp overlap │
+             └───────────┬───────────┘
                          │
          ┌───────────────┴───────────────┐
          │                               │
          ▼                               ▼
-┌────────────────┐              ┌───────────────┐
-│  Diarization   │              │ Transcription │
-│  (pyannote)    │              │ (Whisper)     │
-│                │              │               │
-│ "Who spoke     │              │ "What was     │
-│  when"         │              │  said"        │
-└───────┬────────┘              └───────┬───────┘
-        │                               │
-        └───────────────┬───────────────┘
-                        │
-                        ▼
-            ┌───────────────────────┐
-            │  Segment Alignment    │
-            │  (Match text to       │
-            │   speaker by time)    │
-            └───────────┬───────────┘
-                        │
-                        ▼
-            ┌───────────────────────┐
-            │  Embedding Extraction │
-            │  (Extract speaker     │
-            │   voice signature)    │
-            └───────────┬───────────┘
-                        │
-                        ▼
-            ┌───────────────────────┐
-            │  Speaker Matching     │
-            │  (Compare to known    │
-            │   speakers)           │
-            └───────────┬───────────┘
-                        │
-         ┌──────────────┴──────────────┐
-         │                             │
-         ▼                             ▼
-┌────────────────┐          ┌──────────────────┐
-│  Known Speaker │          │ Unknown Speaker  │
-│  "Alice"       │          │ "Unknown_01"     │
-└────────────────┘          └────────┬─────────┘
-                                     │
-                                     ▼
-                          ┌──────────────────────┐
-                          │  Auto-Clustering     │
-                          │  (Group similar      │
-                          │   unknowns)          │
-                          └──────────┬───────────┘
-                                     │
-                                     ▼
-                          ┌──────────────────────┐
-                          │  User Identifies     │
-                          │  → Embedding Merging │
-                          │  → Retroactive       │
-                          │     Updates          │
-                          └──────────────────────┘
+┌────────────────────┐      ┌────────────────────────┐
+│ Embedding          │      │  Speaker Matching      │
+│ Extraction         │      │  (Cosine Similarity)   │
+│ (pyannote)         │      │                        │
+│                    │      │  Compare embeddings    │
+│ • Extract voice    │──────→  to known speakers     │
+│   signature        │      │                        │
+│ • 512-D vectors    │      │  Threshold: 0.20-0.30  │
+│ • Context padding  │      │                        │
+│   (0.15s)          │      │  Match or Unknown?     │
+│ • Skip if <0.5s    │      │                        │
+└────────────────────┘      └───────────┬────────────┘
+                                        │
+                         ┌──────────────┴──────────────┐
+                         │                             │
+                         ▼                             ▼
+                ┌─────────────────┐         ┌──────────────────┐
+                │  Known Speaker  │         │ Unknown Speaker  │
+                │  "Alice"        │         │ "Unknown_01"     │
+                │                 │         │                  │
+                │  • Has ID       │         │  • No ID yet     │
+                │  • Confidence   │         │  • Auto-enrolled │
+                │    score        │         │  • Embedding     │
+                │                 │         │    stored        │
+                └────────┬────────┘         └────────┬─────────┘
+                         │                           │
+                         └──────────┬────────────────┘
+                                    │
+                                    ▼
+                        ┌───────────────────────┐
+                        │  Emotion Detection    │
+                        │  (emotion2vec+)       │
+                        │                       │
+                        │  "How they felt"      │
+                        │                       │
+                        │  Per segment:         │
+                        │  • Extract audio      │
+                        │  • Resample to 16kHz  │
+                        │  • Run inference      │
+                        │  • Parse results      │
+                        │                       │
+                        │  Output (4 fields):   │
+                        │  • Category (9 types) │
+                        │    angry, happy, sad, │
+                        │    neutral, fearful,  │
+                        │    surprised, etc.    │
+                        │  • Arousal (0-1)      │
+                        │  • Valence (0-1)      │
+                        │  • Confidence (0-1)   │
+                        │                       │
+                        │  ~32ms per segment    │
+                        └───────────┬───────────┘
+                                    │
+                                    ▼
+                        ┌───────────────────────┐
+                        │  Database Storage     │
+                        │                       │
+                        │  ConversationSegment: │
+                        │  • text               │
+                        │  • speaker_name       │
+                        │  • speaker_id         │
+                        │  • confidence         │
+                        │  • emotion_category   │
+                        │  • emotion_arousal    │
+                        │  • emotion_valence    │
+                        │  • emotion_confidence │
+                        │  • start/end times    │
+                        │  • word-level data    │
+                        └───────────┬───────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+                    ▼                               ▼
+          ┌──────────────────┐          ┌──────────────────────┐
+          │  Auto-Clustering │          │  User Identifies     │
+          │                  │          │  Unknown Speaker     │
+          │  Group similar   │          │                      │
+          │  Unknown speakers│          │  "Unknown_01 is Bob" │
+          │  by embedding    │          │                      │
+          │  similarity      │          │  → Embedding Merging │
+          └──────────────────┘          │  → Retroactive       │
+                                        │     Updates (all     │
+                                        │     past segments)   │
+                                        └──────────────────────┘
 ```
+
+**Key Points:**
+- **Parallel Processing**: Transcription (Whisper) and Diarization (Pyannote) run simultaneously using ThreadPoolExecutor, achieving ~50% speedup
+- **Audio Conversion**: Automatic format conversion (MP3→WAV) before processing; live recording saves 48kHz chunks
+- **Sequential Operations**: Alignment → Embedding Extraction → Speaker Matching → Emotion Detection (in order)
+- **Emotion Detection**: Runs AFTER speaker identification, per segment, with automatic 16kHz resampling
+- **Sample Rates**: Browser (48kHz) → Whisper/Pyannote (auto-resample) → Emotion (16kHz) → Storage (MP3 192k)
 
 ### Processing Pipeline
 
