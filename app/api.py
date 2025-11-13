@@ -286,6 +286,10 @@ async def process_audio(
                 start_offset=seg["start"],
                 end_offset=seg["end"],
                 confidence=confidence,
+                emotion_category=seg.get("emotion_category"),
+                emotion_arousal=seg.get("emotion_arousal"),
+                emotion_valence=seg.get("emotion_valence"),
+                emotion_confidence=seg.get("emotion_confidence"),
                 words_data=words_json,  # Include word-level confidence
                 avg_logprob=seg.get("avg_logprob")
             )

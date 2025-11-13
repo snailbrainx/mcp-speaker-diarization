@@ -74,6 +74,10 @@ class ConversationSegmentResponse(BaseModel):
     start_offset: float
     end_offset: float
     confidence: Optional[float]
+    emotion_category: Optional[str] = None
+    emotion_arousal: Optional[float] = None
+    emotion_valence: Optional[float] = None
+    emotion_confidence: Optional[float] = None
     words: Optional[List[Word]] = None
     avg_logprob: Optional[float] = None
     is_misidentified: bool = False

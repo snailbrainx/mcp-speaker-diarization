@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI):
     whisper = engine.whisper_model  # Loads Whisper
     diarization = engine.diarization_pipeline  # Loads diarization
     embedding = engine.embedding_model  # Loads embeddings
+    emotion = engine.emotion_model  # Loads emotion2vec
 
     # Force VRAM allocation by running a warmup pass (only on GPU)
     if torch.cuda.is_available():

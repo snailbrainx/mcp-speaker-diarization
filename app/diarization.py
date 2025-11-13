@@ -117,6 +117,7 @@ class SpeakerRecognitionEngine:
         self._diarization_pipeline = None
         self._embedding_model = None
         self._whisper_model = None
+        self._emotion_model = None
 
         print(f"Speaker Recognition Engine initialized on device: {self.device}")
 
@@ -167,6 +168,31 @@ class SpeakerRecognitionEngine:
             self._whisper_model = WhisperModel(model_name, device=device_name, compute_type=compute_type)
             print(f"faster-whisper model '{model_name}' loaded on {device_name} with {compute_type}")
         return self._whisper_model
+
+    @property
+    def emotion_model(self):
+        """Lazy load emotion2vec model via FunASR"""
+        if self._emotion_model is None:
+            print("Loading emotion2vec model via FunASR...")
+            try:
+                from funasr import AutoModel
+                # Load emotion2vec+ model from ModelScope/HuggingFace
+                # Using 'plus_large' for better accuracy (can switch to 'plus_base' for speed)
+                model_name = os.getenv("EMOTION_MODEL", "iic/emotion2vec_plus_large")
+                self._emotion_model = AutoModel(
+                    model=model_name,
+                    hub="hf",  # Use HuggingFace hub (fix for overseas users)
+                    disable_update=True  # Don't auto-update models
+                )
+                print(f"emotion2vec model loaded successfully ({model_name})")
+            except ImportError:
+                print("Warning: FunASR not installed. Emotion detection will be disabled.")
+                print("Install with: pip install funasr")
+                return None
+            except Exception as e:
+                print(f"Warning: Failed to load emotion2vec model: {e}")
+                return None
+        return self._emotion_model
 
     def transcribe(self, audio_file: str) -> List[Dict]:
         """
@@ -419,6 +445,162 @@ class SpeakerRecognitionEngine:
             else:
                 raise
 
+    def extract_emotion(
+        self,
+        audio_file: str,
+        start_time: Optional[float] = None,
+        end_time: Optional[float] = None
+    ) -> Optional[Dict]:
+        """
+        Extract emotion from audio file or segment using emotion2vec via FunASR
+
+        Args:
+            audio_file: Path to audio file
+            start_time: Optional start time for segment (seconds)
+            end_time: Optional end time for segment (seconds)
+
+        Returns:
+            Dictionary with emotion data or None if extraction fails:
+            {
+                'emotion_category': str,  # Primary emotion label
+                'emotion_arousal': float,  # 0-1
+                'emotion_valence': float,  # 0-1
+                'emotion_confidence': float  # 0-1
+            }
+        """
+        if self.emotion_model is None:
+            return None
+
+        try:
+            # FunASR emotion2vec can process audio file directly or with timestamps
+            # Format: model.generate(input, granularity="utterance")
+
+            if start_time is not None and end_time is not None:
+                # For segments, we need to extract the audio first
+                import torchaudio
+                from pydub import AudioSegment
+                import tempfile
+
+                # Extract segment to temporary file
+                audio = AudioSegment.from_file(audio_file)
+                start_ms = int(start_time * 1000)
+                end_ms = int(end_time * 1000)
+                segment = audio[start_ms:end_ms]
+
+                # Resample to 16kHz if needed (emotion2vec requirement)
+                # This won't affect faster-whisper or pyannote which handle their own resampling
+                if segment.frame_rate != 16000:
+                    segment = segment.set_frame_rate(16000)
+
+                # Save to temp file
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                    segment.export(temp_file.name, format='wav')
+                    temp_path = temp_file.name
+
+                # Process with emotion2vec
+                result = self.emotion_model.generate(
+                    temp_path,
+                    granularity="utterance",
+                    extract_embedding=False
+                )
+
+                # Clean up temp file
+                import os
+                os.unlink(temp_path)
+            else:
+                # Process entire file - need to check/resample first
+                from pydub import AudioSegment
+                import tempfile
+
+                audio = AudioSegment.from_file(audio_file)
+
+                # Resample to 16kHz if needed
+                if audio.frame_rate != 16000:
+                    audio = audio.set_frame_rate(16000)
+                    # Create temp file with resampled audio
+                    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_file:
+                        audio.export(temp_file.name, format='wav')
+                        temp_path = temp_file.name
+
+                    result = self.emotion_model.generate(
+                        temp_path,
+                        granularity="utterance",
+                        extract_embedding=False
+                    )
+
+                    # Clean up
+                    import os
+                    os.unlink(temp_path)
+                else:
+                    # Already 16kHz, use directly
+                    result = self.emotion_model.generate(
+                        audio_file,
+                        granularity="utterance",
+                        extract_embedding=False
+                    )
+
+            # FunASR emotion2vec returns list of results
+            # Format: [[{'labels': ['angry'], 'scores': [0.9]}]]
+            if result and len(result) > 0:
+                # Unwrap nested structure
+                res = result[0] if isinstance(result, list) else result
+                if isinstance(res, list) and len(res) > 0:
+                    res = res[0]
+
+                # Extract emotion label and scores
+                if isinstance(res, dict):
+                    labels = res.get('labels', ['unknown'])
+                    scores = res.get('scores', [0.0])
+
+                    # Find the index with highest score
+                    if isinstance(scores, list) and len(scores) > 0:
+                        max_idx = scores.index(max(scores))
+                        max_score = scores[max_idx]
+
+                        # Get the label at that index
+                        if isinstance(labels, list) and len(labels) > max_idx:
+                            raw_label = labels[max_idx]
+                        else:
+                            raw_label = labels[0] if isinstance(labels, list) else str(labels)
+                    else:
+                        raw_label = labels[0] if isinstance(labels, list) else str(labels)
+                        max_score = 0.0
+
+                    # Extract English label (format: "中文/english")
+                    if '/' in raw_label:
+                        emotion_label = raw_label.split('/')[-1].strip()
+                    else:
+                        emotion_label = raw_label
+                else:
+                    emotion_label = 'unknown'
+                    max_score = 0.0
+
+                # Map emotion labels to arousal/valence (approximate mapping)
+                # emotion2vec supports: angry, disgusted, fearful, happy, neutral, other, sad, surprised, unknown
+                arousal_map = {
+                    'angry': 0.8, 'disgusted': 0.6, 'fearful': 0.7, 'happy': 0.7,
+                    'neutral': 0.5, 'sad': 0.3, 'surprised': 0.8, 'other': 0.5, 'unknown': 0.5
+                }
+                valence_map = {
+                    'angry': 0.2, 'disgusted': 0.2, 'fearful': 0.2, 'happy': 0.9,
+                    'neutral': 0.5, 'sad': 0.1, 'surprised': 0.6, 'other': 0.5, 'unknown': 0.5
+                }
+
+                return {
+                    'emotion_category': emotion_label,
+                    'emotion_arousal': arousal_map.get(emotion_label, 0.5),
+                    'emotion_valence': valence_map.get(emotion_label, 0.5),
+                    'emotion_confidence': float(max_score)
+                }
+
+            return None
+
+        except Exception as e:
+            print(f"Warning: Failed to extract emotion: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
+
     def process_audio_with_recognition(
         self,
         audio_file: str,
@@ -612,7 +794,14 @@ class SpeakerRecognitionEngine:
                     unknown_counter += 1
                 speaker_name = unknown_speaker_map[speaker_label]
 
-            transcribed_with_speakers.append({
+            # Extract emotion for this segment
+            emotion_data = self.extract_emotion(
+                audio_file,
+                trans_seg["start"],
+                trans_seg["end"]
+            )
+
+            segment_data = {
                 "start": trans_seg["start"],
                 "end": trans_seg["end"],
                 "text": trans_seg["text"],
@@ -623,7 +812,18 @@ class SpeakerRecognitionEngine:
                 "embedding": embedding,  # Include embedding for unknown speakers
                 "words": trans_seg.get("words", []),  # Include word-level data
                 "avg_logprob": trans_seg.get("avg_logprob")  # Include segment confidence
-            })
+            }
+
+            # Add emotion data if available
+            if emotion_data:
+                segment_data.update({
+                    "emotion_category": emotion_data.get("emotion_category"),
+                    "emotion_arousal": emotion_data.get("emotion_arousal"),
+                    "emotion_valence": emotion_data.get("emotion_valence"),
+                    "emotion_confidence": emotion_data.get("emotion_confidence")
+                })
+
+            transcribed_with_speakers.append(segment_data)
 
         return {
             "segments": transcribed_with_speakers,

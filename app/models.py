@@ -103,6 +103,12 @@ class ConversationSegment(Base):
 
     confidence = Column(Float, nullable=True)  # Speaker identification confidence
 
+    # Emotion detection (from emotion2vec)
+    emotion_category = Column(String, nullable=True)  # Primary emotion label (happy, sad, angry, etc.)
+    emotion_arousal = Column(Float, nullable=True)  # Arousal level (0-1, calm to excited)
+    emotion_valence = Column(Float, nullable=True)  # Valence (0-1, negative to positive)
+    emotion_confidence = Column(Float, nullable=True)  # Confidence score for emotion prediction
+
     # Word-level transcription data with confidence scores (JSON)
     words_data = Column(Text, nullable=True)  # Stores JSON array of {word, start, end, probability}
     avg_logprob = Column(Float, nullable=True)  # Segment-level average log probability

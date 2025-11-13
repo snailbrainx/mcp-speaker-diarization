@@ -181,6 +181,10 @@ async def reprocess_conversation(
             start_offset=seg["start"],
             end_offset=seg["end"],
             confidence=confidence,
+            emotion_category=seg.get("emotion_category"),
+            emotion_arousal=seg.get("emotion_arousal"),
+            emotion_valence=seg.get("emotion_valence"),
+            emotion_confidence=seg.get("emotion_confidence"),
             words_data=words_json,  # Include word-level confidence
             avg_logprob=seg.get("avg_logprob")
         )
@@ -619,7 +623,7 @@ async def get_segment_audio(
     try:
         # Use ffmpeg to extract the specific time range with small padding at end
         duration = end_time - start_time
-        duration_with_padding = duration + 0.15  # Add 150ms to avoid cutting off last word
+        duration_with_padding = duration + 0.25  # Add 250ms to avoid cutting off last word
         print(f"  Extracting {duration_with_padding:.2f}s from offset {start_time:.2f}s")
         print(f"  Output: {temp_path}")
 

@@ -285,6 +285,10 @@ async def _handle_segment_processed(
                 start_offset=seg_start_offset,
                 end_offset=seg_end_offset,
                 confidence=confidence,
+                emotion_category=seg.get("emotion_category"),
+                emotion_arousal=seg.get("emotion_arousal"),
+                emotion_valence=seg.get("emotion_valence"),
+                emotion_confidence=seg.get("emotion_confidence"),
                 segment_audio_path=segment_file,
                 words_data=words_json,
                 avg_logprob=seg.get("avg_logprob")
@@ -299,6 +303,10 @@ async def _handle_segment_processed(
                 "start_offset": seg_start_offset,
                 "end_offset": seg_end_offset,
                 "confidence": confidence,
+                "emotion_category": seg.get("emotion_category"),
+                "emotion_arousal": seg.get("emotion_arousal"),
+                "emotion_valence": seg.get("emotion_valence"),
+                "emotion_confidence": seg.get("emotion_confidence"),
                 "is_known": seg.get("is_known", False),
                 "words": seg.get("words", []),  # Include word-level data
                 "avg_logprob": seg.get("avg_logprob")
