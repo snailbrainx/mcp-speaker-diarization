@@ -418,7 +418,8 @@ For stricter matching with movie audio or challenging conditions, reduce SPEAKER
 │    scores          │           │    (SPEAKER_00, etc.) │
 │  • VAD filtering   │           │  • Time boundaries    │
 │                    │           │                       │
-│  ~2-10 seconds     │           │  ~2-10 seconds        │
+│  ~40-100ms         │           │  ~40-100ms            │
+│  (live segments)   │           │  (live segments)      │
 └─────────┬──────────┘           └───────────┬───────────┘
           │                                  │
           └──────────────┬───────────────────┘
@@ -485,7 +486,7 @@ For stricter matching with movie audio or challenging conditions, reduce SPEAKER
                         │  • Valence (0-1)      │
                         │  • Confidence (0-1)   │
                         │                       │
-                        │  ~32ms per segment    │
+                        │  ~30ms per segment    │
                         └───────────┬───────────┘
                                     │
                                     ▼
@@ -523,9 +524,15 @@ For stricter matching with movie audio or challenging conditions, reduce SPEAKER
 
 **Key Points:**
 - **Parallel Processing**: Transcription (Whisper) and Diarization (Pyannote) run simultaneously using ThreadPoolExecutor, achieving ~50% speedup
+- **Processing Speed** (live recording): ~100ms total per segment on GPU
+  - Transcription + Diarization: ~40-100ms (parallel)
+  - Alignment + Embedding + Matching: ~20-40ms
+  - Emotion Detection: ~30ms
+  - Upload timing varies by file size (scales linearly with audio duration)
 - **Audio Conversion**: Automatic format conversion (MP3→WAV) before processing; live recording saves 48kHz chunks
 - **Sequential Operations**: Alignment → Embedding Extraction → Speaker Matching → Emotion Detection (in order)
 - **Emotion Detection**: Runs AFTER speaker identification, per segment, with automatic 16kHz resampling
+- **Why Sequential?**: The real bottleneck (transcription + diarization) is already parallelized. Post-processing is fast enough that further parallelization would add complexity without meaningful speedup
 - **Sample Rates**: Browser (48kHz) → Whisper/Pyannote (auto-resample) → Emotion (16kHz) → Storage (MP3 192k)
 
 ### Processing Pipeline
