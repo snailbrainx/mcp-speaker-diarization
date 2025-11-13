@@ -411,6 +411,9 @@ async def restore_from_file(filename: str, db: Session = Depends(get_db)):
             config.reload_settings()  # Force reload from disk
 
         # Delete all existing speakers first (for clean slate)
+        # IMPORTANT: With foreign keys enabled, we must NULL out segment references first
+        from .models import ConversationSegment
+        db.query(ConversationSegment).update({"speaker_id": None})
         db.query(Speaker).delete()
         db.commit()
 

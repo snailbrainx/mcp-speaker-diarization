@@ -86,7 +86,7 @@ class ConversationSegment(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=False)
-    speaker_id = Column(Integer, ForeignKey("speakers.id"), nullable=True)  # Null for unknown
+    speaker_id = Column(Integer, ForeignKey("speakers.id", ondelete="SET NULL"), nullable=True)  # Null for unknown - auto-set to NULL when speaker deleted
     speaker_name = Column(String, nullable=True)  # Denormalized for quick access
     text = Column(Text, nullable=True)  # Transcription text
 

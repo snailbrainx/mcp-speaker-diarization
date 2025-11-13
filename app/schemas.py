@@ -12,6 +12,7 @@ class SpeakerResponse(SpeakerBase):
     id: int
     created_at: datetime
     updated_at: datetime
+    segment_count: int = 0  # Number of segments this speaker has
 
     class Config:
         from_attributes = True

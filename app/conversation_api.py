@@ -405,19 +405,34 @@ async def identify_speaker_in_segment(
                 else:
                     print(f"⚠️ No valid segments remaining for '{old_speaker.name}' after removing segment {segment_id}")
 
-    # Auto-cleanup: Delete orphaned Unknown speakers
-    if old_speaker_name and old_speaker_name.startswith("Unknown_"):
-        # Check if any segments still use this Unknown speaker
-        remaining_segments = db.query(ConversationSegment).filter(
-            ConversationSegment.speaker_name == old_speaker_name
-        ).count()
+    # CRITICAL: Flush changes to DB so cleanup queries see the updated segments
+    db.flush()
 
-        if remaining_segments == 0:
-            # No segments use this Unknown speaker anymore - delete it
-            orphaned_speaker = db.query(Speaker).filter(Speaker.name == old_speaker_name).first()
-            if orphaned_speaker:
-                db.delete(orphaned_speaker)
-                merge_msg += f" (auto-deleted orphaned {old_speaker_name})"
+    # Auto-cleanup: Delete ALL orphaned Unknown speakers (not just the one being identified)
+    # This ensures a clean speakers list after every identification
+    print(f"🔍 Starting cleanup check for orphaned Unknown speakers...")
+    all_unknown_speakers = db.query(Speaker).filter(Speaker.name.like("Unknown_%")).all()
+    print(f"🔍 Found {len(all_unknown_speakers)} Unknown speakers to check")
+    deleted_unknowns = []
+
+    for unknown in all_unknown_speakers:
+        # Check if this Unknown speaker has any segments
+        segment_count = db.query(ConversationSegment).filter(
+            ConversationSegment.speaker_id == unknown.id
+        ).count()
+        print(f"🔍 Speaker {unknown.name} (ID: {unknown.id}) has {segment_count} segments")
+
+        if segment_count == 0:
+            # Orphaned - delete it
+            db.delete(unknown)
+            deleted_unknowns.append(unknown.name)
+            print(f"🗑️ Auto-deleted orphaned speaker: {unknown.name}")
+
+    if deleted_unknowns:
+        if len(deleted_unknowns) == 1:
+            merge_msg += f" (auto-deleted orphaned {deleted_unknowns[0]})"
+        else:
+            merge_msg += f" (auto-deleted {len(deleted_unknowns)} orphaned Unknown speakers)"
 
     db.commit()
     db.refresh(segment)

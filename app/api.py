@@ -43,9 +43,30 @@ async def get_status():
 
 @router.get("/speakers", response_model=List[SpeakerResponse])
 async def list_speakers(db: Session = Depends(get_db)):
-    """List all enrolled speakers"""
-    speakers = db.query(Speaker).all()
-    return speakers
+    """List all enrolled speakers with segment counts"""
+    from sqlalchemy import func
+
+    # Query speakers with segment counts
+    speakers_with_counts = db.query(
+        Speaker,
+        func.count(ConversationSegment.id).label('segment_count')
+    ).outerjoin(
+        ConversationSegment, Speaker.id == ConversationSegment.speaker_id
+    ).group_by(Speaker.id).all()
+
+    # Convert to response format
+    result = []
+    for speaker, segment_count in speakers_with_counts:
+        speaker_dict = {
+            "id": speaker.id,
+            "name": speaker.name,
+            "created_at": speaker.created_at,
+            "updated_at": speaker.updated_at,
+            "segment_count": segment_count
+        }
+        result.append(SpeakerResponse(**speaker_dict))
+
+    return result
 
 
 @router.post("/speakers/enroll", response_model=SpeakerResponse)
