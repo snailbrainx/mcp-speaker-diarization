@@ -43,9 +43,10 @@ async def update_voice_settings(updates: SettingsUpdateRequest):
     - **speaker_threshold**: Speaker similarity threshold (0.0-1.0). Lower = stricter matching.
       - 0.30: Normal home usage (default)
       - 0.20: Noisy environments (movies, background noise)
-    - **emotion_threshold**: Global emotion matching threshold (0.3-0.9). Higher = stricter matching.
+    - **emotion_threshold**: Global emotion matching threshold (0.3-1.0). Higher = stricter matching.
       - 0.60: Balanced (default)
-      - 0.70-0.80: Fewer false positives, require stronger emotion matches
+      - 0.70-0.90: Fewer false positives, require stronger emotion matches
+      - 0.95-1.00: Very strict, require near-perfect matches
       - 0.40-0.50: More lenient, applies personalization more often
     - **context_padding**: Padding before/after segments for embedding extraction (seconds)
       - 0.15: Default, helps with background music

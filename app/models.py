@@ -48,6 +48,11 @@ class SpeakerEmotionProfile(Base):
     # Metadata
     sample_count = Column(Integer, default=1)  # How many corrections went into this
     confidence_threshold = Column(Float, nullable=True)  # Per-speaker-per-emotion threshold (NULL = use speaker/global)
+    
+    # Voice embedding for this specific emotion (512-D from pyannote) - NEW for dual-detector system
+    voice_embedding = Column(LargeBinary, nullable=True)  # Voice signature when expressing THIS emotion
+    voice_sample_count = Column(Integer, default=0)  # How many voice samples in this emotion profile
+    voice_threshold = Column(Float, nullable=True)  # Custom threshold for voice matching (NULL = use speaker/global)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -61,14 +66,29 @@ class SpeakerEmotionProfile(Base):
     speaker = relationship("Speaker", back_populates="emotion_profiles")
 
     def get_embedding(self):
-        """Convert binary embedding to numpy array"""
+        """Convert binary emotion embedding to numpy array"""
         import numpy as np
         return np.frombuffer(self.embedding, dtype=np.float32)
 
     def set_embedding(self, embedding_array):
-        """Convert numpy array to binary"""
+        """Convert numpy array to binary (emotion embedding)"""
         import numpy as np
         self.embedding = embedding_array.astype(np.float32).tobytes()
+    
+    def get_voice_embedding(self):
+        """Convert binary voice embedding to numpy array"""
+        if self.voice_embedding is None:
+            return None
+        import numpy as np
+        return np.frombuffer(self.voice_embedding, dtype=np.float32)
+    
+    def set_voice_embedding(self, embedding_array):
+        """Convert numpy array to binary (voice embedding)"""
+        if embedding_array is None:
+            self.voice_embedding = None
+            return
+        import numpy as np
+        self.voice_embedding = embedding_array.astype(np.float32).tobytes()
 
 
 class Recording(Base):
@@ -156,6 +176,9 @@ class ConversationSegment(Base):
     emotion_corrected_at = Column(DateTime, nullable=True)  # When correction was made
     emotion_misidentified = Column(Boolean, default=False, nullable=False)  # True if emotion correction was wrong (exclude from profile)
 
+    # Dual-detector breakdown (JSON string with both detector results)
+    detector_breakdown = Column(Text, nullable=True)  # JSON string with detector breakdown for transparency
+
     # Word-level transcription data with confidence scores (JSON)
     words_data = Column(Text, nullable=True)  # Stores JSON array of {word, start, end, probability}
     avg_logprob = Column(Float, nullable=True)  # Segment-level average log probability
@@ -164,6 +187,11 @@ class ConversationSegment(Base):
 
     # Misidentification tracking
     is_misidentified = Column(Boolean, default=False, nullable=False)  # True if this segment was wrongly assigned to current speaker
+
+    # Cached embeddings (for fast recalculation without audio re-extraction)
+    # Stored as binary (numpy array -> bytes) to avoid reprocessing audio files
+    speaker_embedding = Column(LargeBinary, nullable=True)  # 512-D pyannote embedding (~2KB)
+    emotion_embedding = Column(LargeBinary, nullable=True)  # 1024-D emotion2vec embedding (~4KB)
 
     # Relationships
     conversation = relationship("Conversation", back_populates="transcript_segments")
@@ -179,6 +207,36 @@ class ConversationSegment(Base):
             except:
                 return None
         return None
+
+    def get_speaker_embedding(self):
+        """Convert binary speaker embedding back to numpy array"""
+        if self.speaker_embedding is None:
+            return None
+        import numpy as np
+        return np.frombuffer(self.speaker_embedding, dtype=np.float32)
+
+    def set_speaker_embedding(self, embedding_array):
+        """Convert numpy array to binary for storage"""
+        if embedding_array is None:
+            self.speaker_embedding = None
+            return
+        import numpy as np
+        self.speaker_embedding = embedding_array.astype(np.float32).tobytes()
+
+    def get_emotion_embedding(self):
+        """Convert binary emotion embedding back to numpy array"""
+        if self.emotion_embedding is None:
+            return None
+        import numpy as np
+        return np.frombuffer(self.emotion_embedding, dtype=np.float32)
+
+    def set_emotion_embedding(self, embedding_array):
+        """Convert numpy array to binary for storage"""
+        if embedding_array is None:
+            self.emotion_embedding = None
+            return
+        import numpy as np
+        self.emotion_embedding = embedding_array.astype(np.float32).tobytes()
 
 
 class GroundTruthLabel(Base):

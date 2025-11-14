@@ -97,8 +97,25 @@ async def enroll_speaker(
         shutil.copyfileobj(audio_file.file, buffer)
 
     try:
+        # Convert MP3 to WAV if needed (speaker enrollment may receive MP3 uploads)
+        wav_temp_path = None
+        if temp_path.lower().endswith('.mp3'):
+            try:
+                print(f"Converting uploaded MP3 to WAV for speaker enrollment...")
+                audio = AudioSegment.from_file(temp_path)
+                wav_temp_path = temp_path.rsplit('.', 1)[0] + '_enrolled.wav'
+                audio.export(wav_temp_path, format='wav')
+                # Use WAV for embedding extraction
+                extraction_path = wav_temp_path
+                print(f"Conversion successful: {wav_temp_path}")
+            except Exception as e:
+                print(f"Warning: Failed to convert MP3 to WAV: {e}")
+                extraction_path = temp_path  # Fall back to MP3
+        else:
+            extraction_path = temp_path
+
         # Extract embedding
-        embedding = engine.extract_embedding(temp_path)
+        embedding = engine.extract_embedding(extraction_path)
 
         # Create speaker in database
         speaker = Speaker(name=name)
@@ -114,9 +131,11 @@ async def enroll_speaker(
         return speaker
 
     finally:
-        # Clean up temp file
+        # Clean up temp files
         if os.path.exists(temp_path):
             os.remove(temp_path)
+        if wav_temp_path and os.path.exists(wav_temp_path):
+            os.remove(wav_temp_path)
 
 
 @router.patch("/speakers/{speaker_id}/rename", response_model=SpeakerResponse)
@@ -316,7 +335,7 @@ async def process_audio(
             else:
                 # Auto-enroll unknown speakers with embeddings (enables clustering)
                 embedding = seg.get("embedding")
-                if embedding is not None and speaker_name.startswith("Unknown_"):
+                if embedding is not None and speaker_name and speaker_name.startswith("Unknown_"):
                     from .diarization import auto_enroll_unknown_speaker
                     speaker_id, speaker_name = auto_enroll_unknown_speaker(
                         embedding, db, threshold=threshold
@@ -339,9 +358,17 @@ async def process_audio(
                 confidence=confidence,
                 emotion_category=seg.get("emotion_category"),
                 emotion_confidence=seg.get("emotion_confidence"),
+                detector_breakdown=json.dumps(seg["detector_breakdown"]) if seg.get("detector_breakdown") else None,
                 words_data=words_json,  # Include word-level confidence
                 avg_logprob=seg.get("avg_logprob")
             )
+
+            # Store embeddings for fast recalculation (no audio re-extraction needed)
+            if seg.get("embedding") is not None:
+                segment.set_speaker_embedding(seg["embedding"])
+            if seg.get("emotion_embedding") is not None:
+                segment.set_emotion_embedding(seg["emotion_embedding"])
+
             db.add(segment)
 
         # Update conversation metadata

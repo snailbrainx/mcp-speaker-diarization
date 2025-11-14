@@ -53,60 +53,25 @@ Example Next.js frontend interface (available at [github.com/snailbrainx/speaker
   </tr>
 </table>
 
-## What Makes This Different
-
-This combines pyannote.audio speaker diarization with faster-whisper transcription, adding a complete speaker recognition layer:
-
-- **Speaker Enrollment & Recognition**: Store speaker profiles, recognize them in future recordings
-- **Emotion Detection**: Real-time emotion recognition (angry, happy, sad, neutral, etc.) per speech segment
-- **Personalized Emotion Learning**: Learn speaker-specific emotion profiles from corrections, improving accuracy over time
-- **Unknown Speaker Auto-Clustering**: Automatically group unknown speakers, identify retroactively
-- **Embedding Management**: Continuous profile improvement through embedding merging
-- **Misidentification Correction**: Mark and fix incorrect identifications, recalculate embeddings
-- **Retroactive Updates**: Rename any speaker → all past segments automatically update
-- **Conversation Structure**: Maintain "who said what" context across sessions
-- **MCP Integration**: Built-in MCP server for AI agent integration
-- **Complete Web UI**: Live recording, speaker management, playback, backup/restore
-
-While other projects combine pyannote.audio and faster-whisper for basic diarization+transcription, this application adds the complete speaker recognition layer: enrolling known speakers, automatically identifying them in recordings, and maintaining speaker identity across sessions—essential for AI agents that need to remember and distinguish between multiple speakers.
-
 ## Key Features
 
-### Core Functionality
-- **Speaker Diarization**: Automatically detect "who spoke when" in audio recordings
-- **Speaker Recognition**: Enroll speakers once, recognize them in all future recordings
-- **Emotion Detection**: Real-time emotion recognition using emotion2vec+ (ACL 2024) - detects angry, happy, sad, neutral, fearful, surprised, disgusted emotions per segment
-- **Personalized Emotion Learning**: Learn speaker-specific emotion profiles from corrections - system remembers how each person expresses emotions and improves accuracy over time
-- **Transcription**: Optional high-quality speech-to-text using faster-whisper (large-v3 model) with word-level confidence scores
-- **Live Recording**: Real-time streaming with voice activity detection and instant processing
-- **Unknown Speaker Handling**: Automatic clustering and enrollment of new speakers
-- **Conversation Management**: Organize recordings with speaker context and full transcripts
-
-### Advanced Features
-- **Misidentification Correction**: Mark and fix incorrectly identified segments
-- **Embedding Merging**: Continuously improve speaker profiles with each recording
-- **Retroactive Updates**: Rename a speaker → all past segments automatically update
-- **Backup/Restore**: Export and restore speaker profiles and identifications
-- **Ground Truth Labeling**: Test and optimize recognition accuracy
-- **Bulk Operations**: Process multiple recordings, convert to MP3, delete conversations
-
-### AI Agent Integration
-- **REST API**: Full programmatic access to all features
-- **MCP-Ready**: API structure designed for Model Context Protocol servers
-- **Speaker Context**: Maintain "who said what" context for AI assistants
-- **Auto-Enrollment**: AI can identify and label unknown speakers during conversations
-- **Conversation Queries**: Retrieve full transcripts with speaker labels for context
+- **Persistent Speaker Recognition**: Enroll speakers once, recognize them across all future recordings and conversations (not just "SPEAKER_00, SPEAKER_01" labels)
+- **Dual-Detector Emotion System**: Combines general AI (emotion2vec+) with personalized voice profiles for dramatically improved emotion detection accuracy across 9 emotions (angry, happy, sad, neutral, fearful, surprised, disgusted, other, unknown)
+- **Personalized Learning**: System learns each speaker's unique emotional voice patterns from corrections with weighted embedding merging (no re-enrollment needed)
+- **Retroactive Intelligence**: Identify one segment → all past segments with that voice automatically update
+- **Transcription**: faster-whisper (large-v3) with word-level confidence scores and 99 language support
+- **Live Streaming**: Real-time recording with WebSocket streaming, VAD, and instant processing
+- **AI-Ready Architecture**: Built-in MCP server enables seamless integration with AI assistants (Claude Desktop, Flowise, custom agents) providing the contextual memory needed for natural multi-party conversations
+- **REST API**: Full programmatic access at `/api/v1/*` (see `/docs` for interactive documentation)
+- **Backup/Restore**: Export/import speaker profiles and voice settings
+- **Production Ready**: Handles thousands of conversations, batch processing, live streaming, MP3 conversion, and scales efficiently
 
 ## Use Cases
 
-- **AI Assistant Calls**: Enable AI agents to identify and remember multiple speakers across sessions
-- **Meeting Transcription**: Automatic speaker labeling for team meetings with word-level confidence scores
-- **Subtitle Generation**: Create accurate subtitles for movies and TV shows with speaker identification
-- **Security & Authentication**: Voice identification at scale for security systems and access control
-- **Interview Processing**: Identify host vs. guests in podcasts and interviews
-- **Customer Support**: Separate agent and customer in support calls
-- **Research**: Analyze multi-party conversations with speaker attribution
-- **Agent Integration**: Seamless integration with AI agents via REST API and MCP server
+**AI Integration**: Enable AI assistants to remember and distinguish multiple speakers across conversations
+**Meeting Transcription**: Automatic labeling with emotion context
+**Research & Analysis**: Multi-party conversation analysis with persistent identity
+**Customer Support**: Separate agents from customers with emotion tracking
 
 ## Technical Stack
 
@@ -122,43 +87,47 @@ While other projects combine pyannote.audio and faster-whisper for basic diariza
 
 ## Emotion Detection
 
-Real-time emotion recognition for each speech segment using **emotion2vec+** (ACL 2024, published paper).
+**Dual-detector system** combining general AI with personalized voice profiles for dramatically improved accuracy.
 
-### Features
-- **9 Emotion Categories**: angry, happy, sad, neutral, fearful, surprised, disgusted, other, unknown
-- **Per-Segment Analysis**: Emotion detected for each speaker turn
-- **Confidence Scores**: Per-prediction confidence levels
-- **Real-Time Processing**: Works with both live recording and file upload
-- **API Integration**: All emotion data returned via REST API and WebSocket
-- **Personalized Learning**: Learn speaker-specific emotion patterns from corrections
+### How It Works
 
-### Supported Emotions
-- **angry**: Anger, frustration, annoyance
-- **happy**: Joy, excitement, contentment
-- **sad**: Sadness, disappointment, melancholy
-- **neutral**: Calm, emotionally neutral speech
-- **fearful**: Fear, anxiety, worry
-- **surprised**: Surprise, astonishment, shock
-- **disgusted**: Disgust, revulsion, distaste
-- **other**: Catch-all for ambiguous emotions
-- **unknown**: Unable to classify
+Two complementary detectors work together:
 
-### API Response Format
-Each conversation segment includes emotion fields:
-```json
-{
-  "speaker": "Andy",
-  "transcription": "Hey, is anyone home?",
-  "emotion_category": "happy",
-  "emotion_confidence": 0.87
-}
-```
+1. **emotion2vec+ Detector** (1024-D emotion embeddings)
+   - General emotion AI trained on large datasets
+   - Works for all speakers (known/unknown)
+   - 9 categories: angry, happy, sad, neutral, fearful, surprised, disgusted, other, unknown
+
+2. **Voice Profile Detector** (512-D speaker embeddings)
+   - Learns each speaker's unique emotional voice patterns
+   - Requires 3+ voice samples per emotion to activate
+   - Checks general + all emotion-specific profiles (Andy, Andy_angry, Andy_happy, etc.)
+
+**Best match wins**: If Andy_angry voice profile matches at 92% vs emotion2vec's 78% neutral, voice detector wins.
+
+### Threshold Configuration
+
+**Environment Variables:**
+- `EMOTION_THRESHOLD=0.6` - Emotion matching sensitivity (0.3-0.9, higher = stricter)
+- `SPEAKER_THRESHOLD=0.30` - Voice matching sensitivity (0.20-0.35, higher = stricter)
+
+Both thresholds can be customized per-speaker or per-emotion via the API for fine-grained control.
+
+### Personalized Learning
+
+Correct any segment's emotion → system learns automatically:
+- Stores emotion embedding (1024-D) for emotion2vec matching
+- Stores voice embedding (512-D) for voice profile matching
+- Merges using weighted averaging (older samples have more weight)
+- Updates general speaker profile too
+- After 3+ corrections per emotion → voice detector activates
+
+Manual correction = 100% confidence. No need to re-identify speaker.
 
 ### Performance
-- **Accuracy**: 100% on test set (angry, happy, neutral)
-- **Speed**: ~32ms per segment
-- **Model Size**: ~300M parameters
-- **VRAM**: ~2GB
+- **Speed**: ~37ms per segment (+5ms for voice matching)
+- **VRAM**: ~2GB emotion2vec + ~1GB speaker embeddings (shared)
+- **Activation**: 3+ voice samples required per emotion
 
 ## System Requirements
 
@@ -349,6 +318,12 @@ SILENCE_DURATION=0.5
 # Set to false if real speech is being filtered
 FILTER_HALLUCINATIONS=true
 
+# Global emotion matching threshold (0.3-1.0)
+# Higher = stricter matching (requires closer match to learned emotion profile)
+# Lower = more lenient (accepts wider range of emotional expressions)
+# Default: 0.6 (balanced - good for most use cases)
+EMOTION_THRESHOLD=0.6
+
 # Whisper transcription model (faster-whisper with CTranslate2)
 # Choose based on GPU capabilities:
 # - tiny.en / tiny: ~400MB VRAM, fastest, lowest accuracy
@@ -466,48 +441,95 @@ For stricter matching with movie audio or challenging conditions, reduce SPEAKER
                                     │
                                     ▼
                         ┌───────────────────────┐
-                        │  Emotion Detection    │
-                        │  (emotion2vec+)       │
+                        │  EMOTION DETECTION    │
+                        │  (Sequential)         │
                         │                       │
                         │  "How they felt"      │
+                        └───────────┬───────────┘
+                                    │
+                        ┌───────────▼───────────┐
+                        │  Step 1: Speaker      │
+                        │  Matching             │
                         │                       │
-                        │  Per segment:         │
-                        │  • Extract audio      │
-                        │  • Resample to 16kHz  │
-                        │  • Run inference      │
-                        │  • Parse results      │
+                        │  • Extract 512-D      │
+                        │    voice embedding    │
+                        │  • Check ALL profiles:│
+                        │    - Andy (general)   │
+                        │    - Andy_angry       │
+                        │    - Andy_happy       │
+                        │    (if ≥3 samples)    │
                         │                       │
-                        │  Output (4 fields):   │
-                        │  • Category (9 types) │
-                        │    angry, happy, sad, │
-                        │    neutral, fearful,  │
-                        │    surprised, etc.    │
-                        │  • Arousal (0-1)      │
-                        │  • Valence (0-1)      │
-                        │  • Confidence (0-1)   │
+                        │  Returns:             │
+                        │  • speaker_name       │
+                        │  • matched_emotion    │
+                        │    (or None)          │
+                        └───────────┬───────────┘
+                                    │
+                        ┌───────────▼───────────┐
+                        │  Step 2: emotion2vec+ │
+                        │  (ALWAYS RUNS)        │
+                        │                       │
+                        │  • Extract 1024-D     │
+                        │    emotion embedding  │
+                        │  • 9 categories       │
+                        │                       │
+                        │  Returns:             │
+                        │  • emotion: "neutral" │
+                        │  • confidence: 0.78   │
                         │                       │
                         │  ~30ms per segment    │
                         └───────────┬───────────┘
                                     │
-                                    ▼
-                        ┌───────────────────────┐
-                        │  Personalized         │
-                        │  Emotion Matching     │
-                        │  (if profiles exist)  │
-                        │                       │
-                        │  For known speakers:  │
-                        │  • Extract 1024-D     │
-                        │    emotion embedding  │
-                        │  • Compare to learned │
-                        │    emotion profiles   │
-                        │  • Cosine similarity  │
-                        │    (threshold: 0.6)   │
-                        │                       │
-                        │  If match found:      │
-                        │  Override base model  │
-                        │                       │
-                        │  ~5ms additional      │
-                        └───────────┬───────────┘
+                        ┌───────────▼───────────┐
+                        │  Decision: Did Step 1 │
+                        │  find emotion profile?│
+                        └───────┬───────────────┘
+                                │
+                      ┌─────────┴─────────┐
+                 YES  │                   │ NO
+                      ▼                   ▼
+          ┌────────────────────┐  ┌──────────────────┐
+          │  FAST PATH         │  │  Check profiles? │
+          │  Override emotion  │  │                  │
+          │                    │  │  If has profiles │
+          │  Use Step 1 result │  │  (≥3 samples):   │
+          │  emotion = "angry" │  │                  │
+          │  conf = 0.92       │  │  → Dual-detector │
+          │                    │  │    comparison    │
+          │  Skip comparison   │  │                  │
+          │                    │  │  Else:           │
+          │  ~0ms (instant)    │  │  → Use emotion2vec│
+          └────────┬───────────┘  └────────┬─────────┘
+                   │                       │
+                   │          ┌────────────▼────────────┐
+                   │          │  SLOW PATH:             │
+                   │          │  Dual-Detector Compare  │
+                   │          │                         │
+                   │          │  • emotion2vec match    │
+                   │          │    (1024-D)             │
+                   │          │  • Voice profile match  │
+                   │          │    (512-D, ≥3 samples)  │
+                   │          │                         │
+                   │          │  Rules:                 │
+                   │          │  1. Both agree → Avg    │
+                   │          │  2. neutral → Trust it  │
+                   │          │  3. Voice >85% → Voice  │
+                   │          │  4. Disagree → neutral  │
+                   │          │  5. Else → emotion2vec  │
+                   │          │                         │
+                   │          │  ~5ms additional        │
+                   │          └────────┬────────────────┘
+                   │                   │
+                   └───────────────────┘
+                                       │
+                        ┌──────────────▼─────────────┐
+                        │  Final Emotion             │
+                        │                            │
+                        │  With detector_breakdown:  │
+                        │  • emotion2vec result      │
+                        │  • voice profile result    │
+                        │  • final decision + reason │
+                        └────────────────────────────┘
                                     │
                                     ▼
                         ┌───────────────────────┐
@@ -549,35 +571,54 @@ For stricter matching with movie audio or challenging conditions, reduce SPEAKER
                                         │  "Actually angry,    │
                                         │   not neutral"       │
                                         │                      │
-                                        │  → Extract 1024-D    │
-                                        │     emotion embedding│
+                                        │  → Extract & store:  │
+                                        │    • 1024-D emotion  │
+                                        │      embedding       │
+                                        │    • 512-D voice     │
+                                        │      embedding       │
                                         │  → Merge into        │
                                         │     SpeakerEmotion   │
                                         │     Profile (weighted│
                                         │     averaging)       │
+                                        │  → Updates:          │
+                                        │    • Andy_angry      │
+                                        │      (emotion profile)│
+                                        │    • General Andy    │
+                                        │      (speaker profile)│
                                         │  → If changing       │
                                         │     emotion: recalc  │
                                         │     OLD profile too  │
-                                        │  → Reprocess applies │
-                                        │     personalized     │
-                                        │     matching         │
+                                        │  → Confidence = 100% │
+                                        │     (manual confirm) │
+                                        │  → After 3+ samples: │
+                                        │     voice detector   │
+                                        │     activates!       │
                                         └──────────────────────┘
 ```
 
 **Key Points:**
 - **Parallel Processing**: Transcription (Whisper) and Diarization (Pyannote) run simultaneously using ThreadPoolExecutor, achieving ~50% speedup
-- **Processing Speed** (live recording): ~105ms total per segment on GPU
+- **Processing Speed** (per segment on GPU):
   - Transcription + Diarization: ~40-100ms (parallel)
-  - Alignment + Embedding + Matching: ~20-40ms
-  - Base Emotion Detection: ~30ms
-  - Personalized Emotion Matching: ~5ms additional (if profiles exist)
-  - Upload timing varies by file size (scales linearly with audio duration)
+  - Alignment + Voice Embedding Extraction: ~20-40ms
+  - Speaker Matching (checks all profiles including emotion-specific): ~0.5ms
+  - emotion2vec+ Extraction (ALWAYS runs): ~30ms
+  - Decision Path:
+    - Fast path override (if emotion profile matched): ~0ms instant
+    - Dual-detector comparison (if profiles exist): ~5ms additional
+    - Fallback to emotion2vec only: ~0ms (already extracted)
 - **Audio Conversion**: Automatic format conversion (MP3→WAV) before processing; live recording saves 48kHz chunks
-- **Sequential Operations**: Alignment → Embedding Extraction → Speaker Matching → Base Emotion Detection → Personalized Emotion Matching (in order)
-- **Emotion Detection**: Base model runs AFTER speaker identification, then personalized matching compares to learned profiles (if available)
-- **Personalized Learning**: User corrections extract 1024-D emotion embeddings, merge into speaker-specific profiles using weighted averaging; changing emotions recalculates BOTH old and new profiles
-- **Why Sequential?**: The real bottleneck (transcription + diarization) is already parallelized. Post-processing is fast enough that further parallelization would add complexity without meaningful speedup
-- **Sample Rates**: Browser (48kHz) → Whisper/Pyannote (auto-resample) → Emotion (16kHz) → Storage (MP3 192k)
+- **Sequential Operations**: Alignment → Voice Embedding Extraction (512-D) → Speaker Matching → emotion2vec Extraction (1024-D) → Decision (override or dual-detector or fallback)
+- **Emotion Detection Flow**:
+  1. Speaker matching checks ALL profiles (general + emotion-specific like Andy_angry)
+  2. emotion2vec ALWAYS extracts emotion (runs for every segment)
+  3. IF speaker matched emotion profile → Override emotion2vec (fast path)
+  4. ELSE IF speaker has learned profiles (≥3 samples) → Dual-detector comparison (5 decision rules)
+  5. ELSE → Use emotion2vec result only
+- **Dual-Detector System**: Stores BOTH 1024-D emotion embeddings (emotion2vec) AND 512-D voice embeddings (speaker recognition) per emotion; voice profile detector requires ≥3 samples to activate
+- **Personalized Learning**: User corrections extract and store BOTH embedding types, merge using weighted averaging; changing emotions recalculates BOTH old and new profiles; confidence set to 100% after manual correction
+- **Why Sequential?**: The bottleneck (transcription + diarization) is parallelized. Post-processing (~35ms total) is fast enough that further parallelization adds complexity without meaningful speedup
+- **Sample Rates**: Browser (48kHz) → Whisper/Pyannote (auto-resample) → Emotion2vec (16kHz) → Storage (WAV 48kHz for streaming, MP3 192k for uploads)
 
 ### Processing Pipeline
 
@@ -596,7 +637,7 @@ For stricter matching with movie audio or challenging conditions, reduce SPEAKER
    - Falls back to closest segment if no exact overlap
 
 4. **Embedding Extraction**
-   - For each segment, extract 192-dimensional voice signature using pyannote embedding model
+   - For each segment, extract 512-dimensional voice signature using pyannote embedding model
    - **Context padding** (0.15s) added before/after for robustness with background noise
    - Minimum segment duration: 0.5 seconds
 
@@ -643,1236 +684,209 @@ Two independent VAD systems work together:
 3. **Automatic Recalculation**: Embedding averaged from all non-misidentified segments
 4. **Prevents Embedding Corruption**: Ensures speaker profiles remain accurate
 
-## Usage
+## REST API & MCP Server
 
-### Web Interface
+### API Overview
 
-A modern Next.js web interface is available as a separate project with full voice management capabilities:
+**Base URL:** `http://localhost:8000/api/v1`
+**Interactive Docs:** `http://localhost:8000/docs` (Swagger UI with test interface)
 
-**Repository:** https://github.com/snailbrainx/speaker_identity_nextjs
+**Key Endpoints:**
 
-**Features:**
-- Live recording with real-time transcription and speaker identification
-- Speaker enrollment and management
-- Conversation browsing with audio playback
-- Speaker identification and correction
-- Profile management and backup/restore
-- Ground truth labeling for testing
+- **System**
+  - `GET /status` - Health check, GPU status, system stats
+- **Settings**
+  - `GET/POST /settings/voice` - Runtime configuration (thresholds, padding, filtering)
+  - `POST /settings/voice/reset` - Reset to defaults
+- **Speakers**
+  - `GET /speakers` - List all enrolled speakers with segment counts
+  - `POST /speakers/enroll` - Enroll new speaker with audio sample
+  - `PATCH /speakers/{id}/rename` - Rename speaker (auto-updates all past segments)
+  - `DELETE /speakers/{id}` - Delete speaker profile
+  - `DELETE /speakers/unknown/all` - Delete all Unknown_* speakers
+- **Emotion Profiles**
+  - `GET /speakers/{id}/emotion-profiles` - View learned emotion profiles
+  - `DELETE /speakers/{id}/emotion-profiles` - Reset emotion profiles
+  - `GET/PATCH /speakers/{id}/emotion-threshold` - Per-speaker emotion threshold
+  - `PATCH /speakers/{id}/emotion-profiles/{emotion}/threshold` - Per-emotion threshold
+- **Conversations**
+  - `GET /conversations` - List all conversations (paginated)
+  - `GET /conversations/{id}` - Get full transcript with all segments
+  - `PATCH /conversations/{id}` - Update conversation metadata
+  - `DELETE /conversations/{id}` - Delete conversation and audio
+  - `POST /conversations/{id}/reprocess` - Re-run diarization with current speakers
+  - `POST /conversations/{id}/recalculate-emotions` - Recalculate emotions for all segments
+  - `POST /process` - Upload and process audio file
+- **Segments**
+  - `POST /conversations/{id}/segments/{seg_id}/identify` - Identify speaker (auto-updates all past)
+  - `POST /conversations/{id}/segments/{seg_id}/correct-emotion` - Correct and learn emotion
+  - `PATCH /conversations/{id}/segments/{seg_id}/misidentified` - Mark speaker as misidentified
+  - `PATCH /conversations/{id}/segments/{seg_id}/emotion-misidentified` - Mark emotion as wrong
+  - `GET /conversations/segments/{seg_id}/audio` - Download segment audio
+- **Streaming**
+  - `WS /streaming/ws` - WebSocket for live recording
+- **Backup/Restore**
+  - `POST /profiles` - Create new backup profile
+  - `GET /profiles` - List all backup profiles
+  - `GET /profiles/{name}` - Get specific profile details
+  - `PATCH /profiles/{name}` - Save current state to profile
+  - `DELETE /profiles/{name}` - Delete backup profile
+  - `POST /profiles/{name}/checkpoints` - Create checkpoint
+  - `POST /profiles/restore` - Restore from backup
+  - `GET /profiles/download/{name}` - Download backup JSON
+  - `POST /profiles/import` - Import backup JSON
 
-The frontend connects to this API backend and provides a complete user interface for all speaker diarization features. See the frontend repository for installation and usage instructions.
+**📖 Full documentation with examples**: `http://localhost:8000/docs`
 
-### REST API
+### MCP Server Integration
 
-Full interactive API documentation available at: `http://localhost:8000/docs` (Swagger/OpenAPI)
+**Model Context Protocol (MCP)** enables AI assistants to directly interact with the speaker diarization system.
 
-Base URL: `http://localhost:8000/api/v1`
+**MCP Endpoint:** `http://localhost:8000/mcp`
+**Protocol:** JSON-RPC 2.0 over HTTP with Server-Sent Events
+**Compatible With:** Claude Desktop, Flowise, custom MCP clients
 
-#### System Endpoints
+**Available MCP Tools (11):**
+1. `list_conversations` - Get conversation IDs and metadata
+2. `get_conversation` - Get full transcript with speaker labels
+3. `get_latest_segments` - Get recent segments across conversations
+4. `identify_speaker_in_segment` - Label unknown speaker (auto-updates all past segments)
+5. `rename_speaker` - Rename existing speaker (auto-updates all past segments)
+6. `list_speakers` - Get all enrolled speaker profiles
+7. `delete_speaker` - Remove speaker profile
+8. `delete_all_unknown_speakers` - Cleanup Unknown_* speakers
+9. `update_conversation_title` - Set conversation title
+10. `reprocess_conversation` - Re-run recognition with updated speaker profiles
+11. `search_conversations_by_speaker` - Find all conversations where a specific speaker appears
 
-**GET /status** - System health and GPU status
-```bash
-curl http://localhost:8000/api/v1/status
-```
-Response:
+**Key Features:**
+- **Automatic Retroactive Updates**: Identifying/renaming a speaker updates ALL past segments automatically
+- **No Reprocessing Needed**: System maintains speaker identity across sessions
+- **Auto-Enrollment**: Can create speaker profiles from any segment
+- **Conversation Context**: AI can retrieve full "who said what" history
+
+**Example MCP Client Configuration (Flowise/Claude Desktop):**
 ```json
 {
-  "status": "ok",
-  "gpu_available": true,
-  "device": "cuda:0",
-  "speaker_count": 5,
-  "conversation_count": 12
-}
-```
-
----
-
-#### Settings Management
-
-**GET /settings/voice** - Get current voice processing settings
-```bash
-curl http://localhost:8000/api/v1/settings/voice
-```
-Response:
-```json
-{
-  "speaker_threshold": 0.30,
-  "context_padding": 0.15,
-  "silence_duration": 0.5,
-  "filter_hallucinations": true
-}
-```
-
-**POST /settings/voice** - Update voice processing settings
-```bash
-curl -X POST http://localhost:8000/api/v1/settings/voice \
-  -H "Content-Type: application/json" \
-  -d '{
-    "speaker_threshold": 0.25,
-    "context_padding": 0.15,
-    "silence_duration": 0.5,
-    "filter_hallucinations": true
-  }'
-```
-
-**POST /settings/voice/reset** - Reset settings to defaults
-```bash
-curl -X POST http://localhost:8000/api/v1/settings/voice/reset
-```
-
----
-
-#### Speaker Management
-
-**GET /speakers** - List all enrolled speakers
-```bash
-curl http://localhost:8000/api/v1/speakers
-```
-Response:
-```json
-[
-  {
-    "id": 1,
-    "name": "Alice",
-    "created_at": "2025-01-09T10:30:00",
-    "embedding_count": 1
-  },
-  {
-    "id": 2,
-    "name": "Bob",
-    "created_at": "2025-01-09T11:00:00",
-    "embedding_count": 3
-  }
-]
-```
-
-**POST /speakers/enroll** - Enroll new speaker or merge with existing
-```bash
-curl -X POST http://localhost:8000/api/v1/speakers/enroll \
-  -F "name=Alice" \
-  -F "audio_file=@voice_sample.wav"
-```
-Parameters:
-- `name` (form field): Speaker name
-- `audio_file` (file): Audio file (WAV/MP3, 10-30s recommended)
-
-Response:
-```json
-{
-  "id": 1,
-  "name": "Alice",
-  "embedding_shape": [192],
-  "message": "Speaker enrolled successfully"
-}
-```
-
-**PATCH /speakers/{speaker_id}/rename** - Rename speaker (updates all past segments)
-```bash
-curl -X PATCH http://localhost:8000/api/v1/speakers/5/rename \
-  -H "Content-Type: application/json" \
-  -d '{"new_name": "Alice Smith"}'
-```
-Response:
-```json
-{
-  "message": "Speaker renamed successfully",
-  "updated_segments": 42
-}
-```
-
-**DELETE /speakers/{speaker_id}** - Delete speaker profile
-```bash
-curl -X DELETE http://localhost:8000/api/v1/speakers/5
-```
-Response:
-```json
-{
-  "message": "Speaker deleted successfully",
-  "affected_segments": 42
-}
-```
-
----
-
-#### Audio Processing
-
-**POST /process** - Process audio file (diarization + optional transcription)
-```bash
-# With transcription
-curl -X POST http://localhost:8000/api/v1/process \
-  -F "audio_file=@recording.mp3" \
-  -F "enable_transcription=true"
-
-# Diarization only (faster)
-curl -X POST http://localhost:8000/api/v1/process \
-  -F "audio_file=@recording.mp3"
-```
-Parameters:
-- `audio_file` (file): Audio file (WAV/MP3)
-- `enable_transcription` (form field, optional): `true` or `false` (default: false)
-
-Response:
-```json
-{
-  "conversation_id": 15,
-  "num_speakers": 3,
-  "duration": 125.5,
-  "segments": [
-    {
-      "start": 0.5,
-      "end": 3.2,
-      "speaker": "Alice",
-      "speaker_id": 1,
-      "confidence": 0.92,
-      "text": "Hello, how are you today?"
-    },
-    {
-      "start": 3.5,
-      "end": 5.8,
-      "speaker": "Unknown_01",
-      "speaker_id": null,
-      "confidence": null,
-      "text": "I'm doing well, thanks for asking."
+  "mcpServers": {
+    "speaker-diarization": {
+      "url": "http://localhost:8000/mcp",
+      "transport": "http"
     }
-  ]
-}
-```
-
----
-
-#### WebSocket Streaming
-
-**WS /streaming/ws** - Real-time audio streaming with live transcription
-
-WebSocket endpoint for browser-based live recording with real-time processing.
-
-**Protocol:**
-- Client → Server: Binary audio chunks (Float32Array)
-- Server → Client: JSON messages (status, segment, error, completed)
-
-**Usage:**
-```javascript
-// 1. Connect WebSocket
-const ws = new WebSocket('ws://localhost:8000/api/v1/streaming/ws');
-
-// 2. Send start message
-ws.send(JSON.stringify({ type: 'start' }));
-
-// 3. Stream audio chunks (48kHz, Float32)
-const mediaRecorder = new MediaRecorder(stream);
-mediaRecorder.ondataavailable = (e) => {
-  const arrayBuffer = await e.data.arrayBuffer();
-  const float32Array = new Float32Array(arrayBuffer);
-  ws.send(float32Array.buffer);
-};
-
-// 4. Receive real-time segments
-ws.onmessage = (event) => {
-  const data = JSON.parse(event.data);
-  if (data.type === 'segment') {
-    console.log(`${data.data.speaker_name}: ${data.data.text}`);
   }
-};
-
-// 5. Stop recording
-ws.send(JSON.stringify({ type: 'stop' }));
-```
-
-**Message Types:**
-- `started` - Recording initiated, returns `conversation_id`
-- `status` - Real-time VAD status and audio level
-- `segment` - Completed segment with transcription and speaker
-- `completed` - Recording finished successfully
-- `error` - Processing error
-
----
-
-#### Conversation Management
-
-**GET /conversations** - List all conversations (with pagination)
-```bash
-# Get first 10 conversations
-curl "http://localhost:8000/api/v1/conversations?skip=0&limit=10"
-```
-Query parameters:
-- `skip` (optional): Number of records to skip (default: 0)
-- `limit` (optional): Max records to return (default: 100)
-
-Response:
-```json
-[
-  {
-    "id": 15,
-    "title": "Conversation 15",
-    "start_time": "2025-01-09T14:30:00",
-    "duration": 125.5,
-    "num_speakers": 3,
-    "audio_path": "data/recordings/conv_15_full.mp3"
-  }
-]
-```
-
-**GET /conversations/{conversation_id}** - Get conversation with full transcript
-```bash
-curl http://localhost:8000/api/v1/conversations/15
-```
-Response:
-```json
-{
-  "id": 15,
-  "title": "Conversation 15",
-  "start_time": "2025-01-09T14:30:00",
-  "duration": 125.5,
-  "num_speakers": 3,
-  "audio_path": "data/recordings/conv_15_full.mp3",
-  "segments": [
-    {
-      "id": 234,
-      "start": 0.5,
-      "end": 3.2,
-      "speaker_name": "Alice",
-      "speaker_id": 1,
-      "text": "Hello, how are you today?",
-      "confidence": 0.92,
-      "is_misidentified": false
-    }
-  ]
 }
 ```
 
-**PATCH /conversations/{conversation_id}** - Update conversation metadata
-```bash
-curl -X PATCH http://localhost:8000/api/v1/conversations/15 \
-  -H "Content-Type: application/json" \
-  -d '{"title": "Team Meeting - 2025-01-09"}'
-```
-
-**DELETE /conversations/{conversation_id}** - Delete conversation and audio
-```bash
-curl -X DELETE http://localhost:8000/api/v1/conversations/15
-```
-
-**POST /conversations/{conversation_id}/reprocess** - Re-run diarization with current speakers
-```bash
-curl -X POST http://localhost:8000/api/v1/conversations/15/reprocess
-```
-Use case: After enrolling new speakers, reprocess past conversations to identify them
-
----
-
-#### Speaker Identification
-
-**POST /conversations/{conversation_id}/segments/{segment_id}/identify** - Identify speaker in segment
-```bash
-# Identify and auto-enroll new speaker
-curl -X POST "http://localhost:8000/api/v1/conversations/15/segments/234/identify?speaker_name=Charlie&enroll=true"
-
-# Identify as existing speaker
-curl -X POST "http://localhost:8000/api/v1/conversations/15/segments/234/identify?speaker_name=Alice&enroll=false"
-
-# Mark as misidentified
-curl -X POST "http://localhost:8000/api/v1/conversations/15/segments/234/identify?speaker_name=Alice&enroll=false&mark_misidentified=true"
-```
-Query parameters:
-- `speaker_name` (required): Name to assign to segment
-- `enroll` (optional): Create speaker profile if doesn't exist (default: false)
-- `mark_misidentified` (optional): Mark segment as misidentified (default: false)
-
-Response:
-```json
-{
-  "message": "Speaker identified successfully",
-  "segment_id": 234,
-  "speaker_name": "Charlie",
-  "retroactive_updates": 8,
-  "speaker_created": true
-}
-```
-
----
-
-#### Emotion Detection & Learning
-
-**POST /conversations/{conversation_id}/segments/{segment_id}/correct-emotion** - Correct emotion and learn profile
-```bash
-# Correct emotion and learn from it
-curl -X POST "http://localhost:8000/api/v1/conversations/15/segments/234/correct-emotion?corrected_emotion=happy&learn=true"
-
-# Just correct without learning
-curl -X POST "http://localhost:8000/api/v1/conversations/15/segments/234/correct-emotion?corrected_emotion=neutral&learn=false"
-```
-Query parameters:
-- `corrected_emotion` (required): The correct emotion (angry, happy, sad, neutral, fearful, surprised, disgusted, other, unknown)
-- `learn` (optional): Whether to learn from this correction and update speaker's emotion profile (default: true)
-
-Response:
-```json
-{
-  "message": "Emotion corrected from 'angry' to 'neutral' (new emotion profile created)",
-  "old_emotion": "angry",
-  "new_emotion": "neutral",
-  "learned": true,
-  "sample_count": 1,
-  "speaker_name": "Alice"
-}
-```
-
-**Important**: Only correct emotions you're CERTAIN about. False corrections create false profiles that affect all future segments for that speaker.
-
-**Recalculation Behavior**: When changing a segment's emotion from one category to another (e.g., angry → neutral):
-- NEW emotion profile is updated to include this segment's embedding
-- OLD emotion profile is recalculated WITHOUT this segment's embedding
-- OLD profile is automatically deleted if no valid corrections remain
-- This mirrors speaker identification behavior and prevents orphaned embeddings
-
-**GET /speakers/{speaker_id}/emotion-profiles** - View learned emotion profiles
-```bash
-curl http://localhost:8000/api/v1/conversations/speakers/5/emotion-profiles
-```
-Response:
-```json
-{
-  "speaker_id": 5,
-  "speaker_name": "Alice",
-  "emotion_threshold": 0.7,
-  "profiles": [
-    {
-      "emotion_category": "happy",
-      "sample_count": 3,
-      "confidence_threshold": null,
-      "created_at": "2025-01-09T14:30:00",
-      "updated_at": "2025-01-09T15:45:00"
-    },
-    {
-      "emotion_category": "neutral",
-      "sample_count": 5,
-      "confidence_threshold": null,
-      "created_at": "2025-01-09T14:32:00",
-      "updated_at": "2025-01-09T16:10:00"
-    }
-  ]
-}
-```
-
-**DELETE /speakers/{speaker_id}/emotion-profiles** - Reset emotion profiles
-```bash
-# Reset specific emotion
-curl -X DELETE "http://localhost:8000/api/v1/conversations/speakers/5/emotion-profiles?emotion_category=angry"
-
-# Reset all emotions for speaker
-curl -X DELETE "http://localhost:8000/api/v1/conversations/speakers/5/emotion-profiles"
-```
-Query parameters:
-- `emotion_category` (optional): Specific emotion to reset. If omitted, resets all emotions for this speaker.
-
-Response:
-```json
-{
-  "message": "Reset emotion profile 'angry' for speaker 'Alice'",
-  "speaker_name": "Alice",
-  "emotion_category": "angry",
-  "deleted": 1
-}
-```
-
-**GET/PATCH /speakers/{speaker_id}/emotion-threshold** - Manage custom emotion threshold
-```bash
-# Get current threshold
-curl http://localhost:8000/api/v1/conversations/speakers/5/emotion-threshold
-
-# Set custom threshold (0.3-0.9 range)
-curl -X PATCH "http://localhost:8000/api/v1/conversations/speakers/5/emotion-threshold?threshold=0.8"
-```
-Query parameters (PATCH only):
-- `threshold` (required): Custom threshold for emotion matching (0.3-0.9). Higher = stricter matching.
-
-Response:
-```json
-{
-  "speaker_id": 5,
-  "speaker_name": "Alice",
-  "custom_threshold": 0.8,
-  "effective_threshold": 0.8,
-  "using_global": false
-}
-```
-
-**How Personalized Emotion Detection Works**:
-1. Base model detects emotions in all segments automatically
-2. When you correct a segment's emotion, system extracts 1024-D emotion embedding
-3. Embedding is stored/merged with speaker's emotion profile for that emotion
-4. Future segments compare to learned profiles using cosine similarity
-5. If match exceeds threshold (default 0.6), personalized emotion overrides base model
-6. Each correction improves the profile using weighted averaging
-
-**PATCH /conversations/{conversation_id}/segments/{segment_id}/emotion-misidentified** - Mark emotion correction as wrong and recalculate
-```bash
-# Mark correction as misidentified (recalculates profile without this segment)
-curl -X PATCH "http://localhost:8000/api/v1/conversations/15/segments/234/emotion-misidentified" \
-  -H "Content-Type: application/json" \
-  -d '{"is_misidentified": true}'
-
-# Unmark (include segment in profile again)
-curl -X PATCH "http://localhost:8000/api/v1/conversations/15/segments/234/emotion-misidentified" \
-  -H "Content-Type: application/json" \
-  -d '{"is_misidentified": false}'
-```
-Response:
-```json
-{
-  "message": "Emotion correction for segment 234 marked as misidentified",
-  "emotion_misidentified": true,
-  "emotion_profile_recalculated": true
-}
-```
-
-When you mark an emotion correction as misidentified:
-- System re-extracts embeddings from ALL non-misidentified corrections for that emotion
-- Recalculates the emotion profile by averaging the valid embeddings
-- If no valid corrections remain, automatically deletes the emotion profile
-- This mirrors the speaker misidentification behavior
-
-**Limitations**:
-- Only works for recognized speakers (not Unknown_*)
-- Requires accurate corrections - use misidentification feature to fix mistakes
-
----
-
-#### Recordings
-
-**GET /recordings** - List all recording files
-```bash
-curl http://localhost:8000/api/v1/recordings
-```
-
-**GET /recordings/{recording_id}** - Get recording details
-```bash
-curl http://localhost:8000/api/v1/recordings/5
-```
-
----
-
-#### Bulk Operations
-
-**POST /conversations/batch-convert-mp3** - Convert all WAV recordings to MP3
-```bash
-curl -X POST "http://localhost:8000/api/v1/conversations/batch-convert-mp3?delete_originals=true"
-```
-Query parameters:
-- `delete_originals` (optional): Delete WAV files after conversion (default: false)
-
-Response:
-```json
-{
-  "converted": 5,
-  "failed": 0,
-  "space_saved_mb": 234.5
-}
-```
-
----
-
-#### Voice Profiles & Backup
-
-**GET /profiles/** - List all voice profiles
-```bash
-curl http://localhost:8000/api/v1/profiles/
-```
-
-**POST /profiles/** - Create new empty profile
-```bash
-curl -X POST http://localhost:8000/api/v1/profiles/ \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Home Profile", "description": "Family members"}'
-```
-
-**POST /profiles/duplicate** - Duplicate current state to new profile
-```bash
-curl -X POST http://localhost:8000/api/v1/profiles/duplicate \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Backup 2025-01", "description": "Monthly backup"}'
-```
-
-**PATCH /profiles/{profile_name}** - Update profile with current state
-```bash
-curl -X PATCH http://localhost:8000/api/v1/profiles/MyProfile \
-  -H "Content-Type: application/json" \
-  -d '{"description": "Updated description"}'
-```
-
-**POST /profiles/restore** - Restore speakers and settings from profile
-```bash
-curl -X POST http://localhost:8000/api/v1/profiles/restore \
-  -H "Content-Type: application/json" \
-  -d '{"filename": "profile_Home_Profile.json"}'
-```
-
-**GET /profiles/download/{profile_name}** - Download profile as JSON
-```bash
-curl http://localhost:8000/api/v1/profiles/download/MyProfile > myprofile.json
-```
-
-**GET /profiles/download-all** - Download all profiles as ZIP
-```bash
-curl http://localhost:8000/api/v1/profiles/download-all > profiles.zip
-```
-
-**POST /profiles/import** - Import profile from JSON file
-```bash
-curl -X POST http://localhost:8000/api/v1/profiles/import \
-  -F "file=@myprofile.json"
-```
-
-**DELETE /profiles/{profile_name}** - Delete profile and checkpoints
-```bash
-curl -X DELETE http://localhost:8000/api/v1/profiles/MyProfile
-```
-
-**Checkpoint Management:**
-```bash
-# Create checkpoint snapshot
-curl -X POST http://localhost:8000/api/v1/profiles/MyProfile/checkpoints
-
-# List checkpoints
-curl http://localhost:8000/api/v1/profiles/MyProfile/checkpoints
-
-# Delete checkpoint
-curl -X DELETE http://localhost:8000/api/v1/profiles/MyProfile/checkpoints/20250109_143000
-```
-
----
-
-#### AI Agent Integration
-
-The API includes a built-in **MCP (Model Context Protocol) server** for seamless AI agent integration.
-
-##### MCP Server
-
-The system includes a native MCP server accessible at `/mcp` endpoint:
-
-**Endpoint:** `http://localhost:8000/mcp`
-**Transport:** HTTP with Server-Sent Events (SSE)
-**Protocol:** JSON-RPC 2.0 (MCP 2024-11-05)
-
-**Connection from AI Agents:**
-
-```json
-{
-  "url": "http://10.x.x.x:8000/mcp",
-  "transport": "http"
-}
-```
-
-Replace `10.x.x.x` with your server's IP address for network access (e.g., from Flowise, Claude Desktop, or other MCP clients).
-
-**Available MCP Tools:**
-
-1. **get_latest_segments**(conversation_id?, limit=20)
-   - Get recent conversation segments with speaker labels and transcripts
-   - Returns segment IDs, speaker names, text, timestamps
-   - Use to see what was just said
-
-2. **identify_speaker_in_segment**(conversation_id, segment_id, speaker_name, auto_enroll=True)
-   - Identify or correct speaker in a segment
-   - KEY tool for when user says "Unknown_01 is Bob"
-   - Automatically updates all matching past segments
-
-3. **list_speakers**()
-   - Get all enrolled speaker profiles with IDs and names
-
-4. **get_conversation**(conversation_id)
-   - Get full conversation with all segments and transcript
-
-5. **list_conversations**(skip=0, limit=10)
-   - Get list of conversations with pagination
-
-6. **rename_speaker**(speaker_id, new_name)
-   - Rename speaker (automatically updates all past segments)
-
-7. **delete_speaker**(speaker_id)
-   - Delete speaker profile
-
-8. **delete_all_unknown_speakers**()
-   - Cleanup tool: Delete ALL speakers with names starting with 'Unknown_'
-   - Useful after identifying all unknowns in conversations
-   - No parameters needed
-
-9. **reprocess_conversation**(conversation_id)
-   - Re-analyze conversation with current speaker profiles
-   - Useful after enrolling new speakers
-
-10. **update_conversation_title**(conversation_id, title)
-   - Update conversation title
-
-11. **search_conversations_by_speaker**(speaker_name, limit=50, skip=0)
-   - Search conversation history by speaker name
-   - Returns all conversations where speaker appears with IDs, titles, datetimes, durations, segment counts
-   - Ordered by most recent first
-   - Use case: "What was I talking about with Nick last week?"
-   - Returns error if speaker doesn't exist
-
-**Example AI Agent Workflow:**
-
+**Usage Example:**
 ```python
-# AI agent connects to MCP server at http://10.x.x.x:8000/mcp
+# AI assistant receives conversation
+Assistant: "I heard multiple voices. Who were you speaking with?"
+User: "That was my colleague Sarah"
 
-# 1. Get latest segments
-result = mcp_client.call_tool("get_latest_segments", {"limit": 20})
+# AI calls MCP tool:
+# identify_speaker_in_segment(segment_id=145, speaker_name="Sarah", auto_enroll=true)
 
-# 2. AI sees "Unknown_01" in transcript
-# User: "Unknown_01 is actually Bob"
+# System automatically:
+# 1. Creates Sarah's speaker profile from segment 145
+# 2. Updates ALL past segments with Sarah's voice
+# 3. Future recordings recognize Sarah automatically
 
-# 3. AI identifies the speaker
-mcp_client.call_tool("identify_speaker_in_segment", {
-    "conversation_id": 15,
-    "segment_id": 234,
-    "speaker_name": "Bob",
-    "auto_enroll": True  # Creates speaker profile automatically
-})
+## AI Assistant Integration Examples
 
-# 4. System automatically:
-#    - Creates "Bob" speaker profile
-#    - Updates all past "Unknown_01" segments to "Bob"
-#    - Returns count of retroactively updated segments
-```
+Build conversational AI assistants with persistent speaker memory using either REST API or MCP server.
 
-**Example: AI Assistant with Speaker Context**
+### Integration Approaches
+
+**Option 1: REST API** (Full Control)
+- Your app manages audio recording and streaming
+- POST audio to `/api/v1/process` or use WebSocket `/streaming/ws`
+- Receive segments with speaker labels and emotions
+- Query conversation history via `/conversations` endpoints
+
+**Option 2: MCP Server** (AI-Native)
+- Connect Claude Desktop, Flowise, or custom MCP clients
+- AI assistant directly calls 10 MCP tools for speaker management
+- Automatic retroactive updates when identifying/renaming speakers
+- Zero code - just configure MCP endpoint
+
+### Example Workflow
+
+**Scenario**: AI assistant having multi-party conversation
+
+1. **Unknown speaker detected**
+   ```
+   User: "Alright mate, how are you doing?"
+   Unknown: "Good mate, you?"
+
+   AI: "Who are you speaking to?"
+   User: "That's Nick"
+   ```
+
+2. **AI identifies speaker via MCP**
+   ```python
+   # MCP tool call (automatic if using Claude/Flowise)
+   identify_speaker_in_segment(
+       segment_id=145,
+       speaker_name="Nick",
+       auto_enroll=true
+   )
+   ```
+
+3. **System auto-updates all past segments**
+   - Creates Nick's voice profile
+   - Updates ALL previous Unknown segments with Nick's voice
+   - Future recordings recognize Nick automatically
+
+4. **AI remembers Nick in future conversations**
+   ```
+   Nick: "Hey, remember what we discussed yesterday?"
+   AI: "Yes Nick, you mentioned the project deadline..."
+   ```
+
+### REST API Quick Start
 
 ```python
 import requests
 
-# Get conversation transcript with speakers
-response = requests.get("http://localhost:8000/api/v1/conversations/123")
+# Process audio file
+with open("meeting.wav", "rb") as f:
+    response = requests.post(
+        "http://localhost:8000/api/v1/process",
+        files={"audio_file": f}
+    )
+
 conversation = response.json()
 
-# Build context for AI
-context = f"Meeting on {conversation['start_time']}:\n\n"
-for segment in conversation['segments']:
-    speaker = segment['speaker_name']
-    text = segment['text']
-    context += f"{speaker}: {text}\n"
-
-# AI now has full speaker context
-# AI can identify unknowns: "Unknown_01 sounds like Bob from engineering"
-requests.post(
-    "http://localhost:8000/api/v1/conversations/123/segments/456/identify",
-    params={"speaker_name": "Bob", "enroll": True}
-)
-```
-
-## AI Assistant Integration Examples
-
-This section shows how to build a conversational AI assistant that uses this speaker diarization system for continuous voice interaction with speaker memory.
-
-### Example Interaction Flow
-
-```
-[Unknown speaker detected in conversation]
-User: "Alright mate, how are you doing?"
-Friend: "Good mate, you?"
-
-AI Assistant: "Who are you speaking to?"
-User: "Oh, that's Nick"
-AI Assistant: "Oh hi Nick!"
-[Background: AI calls MCP tool to identify Unknown_17627242 as "Nick"]
-
-[Future conversations automatically recognize Nick]
-Nick: "Hey, remember what we discussed yesterday?"
-AI Assistant: "Yes Nick, you mentioned the project deadline..."
-```
-
-### Integration Architecture
-
-**How data flows:**
-
-```
-┌─────────────────────────────────────────────────────────┐
-│  Your AI Assistant Application (you build this)         │
-│                                                          │
-│  [1] Continuous audio recording                         │
-│         ↓                                                │
-│  [2] POST audio → /api/v1/process-audio                 │
-│         ↓                                                │
-│  [3] Receive transcription response                     │
-│         ↓                                                │
-│  [4] Format to JSON & send to LLM                       │
-│         ↓                                                │
-│  [5] LLM responds (voice/text)                          │
-│                                                          │
-│  [6] When AI needs speaker info/history:                │
-│      LLM calls MCP tools (on-demand only!)              │
-│      - identify_unknown_speaker()                       │
-│      - get_conversation_transcript()                    │
-│      - update_speaker()                                 │
-└─────────────────────────────────────────────────────────┘
-              ↓ REST API (continuous)
-              ↓ MCP (on-demand)
-┌─────────────────────────────────────────────────────────┐
-│  MCP Speaker Diarization (this system)                  │
-│  - Processes audio                                       │
-│  - Identifies speakers                                   │
-│  - Returns transcriptions                                │
-│  - Stores conversation history                           │
-└─────────────────────────────────────────────────────────┘
-```
-
-**Key point:**
-- **REST API** = continuous data flow (your app gets transcriptions)
-- **MCP** = tools AI calls only when needed (query history, update speakers)
-
----
-
-### Implementation Guide
-
-#### 1. Continuous Recording & Transcription (Your App)
-
-**Your application sends audio to REST API:**
-
-```python
-# your_ai_app.py - Continuous recording loop
-
-import httpx
-import sounddevice as sd
-import numpy as np
-from datetime import datetime
-
-DIARIZATION_API = "http://localhost:8000/api/v1"
-
-async def record_and_process():
-    """Continuous recording, sends to diarization API"""
-
-    while True:
-        # Record audio chunk (e.g., 5 seconds)
-        audio = sd.rec(int(5 * 16000), samplerate=16000, channels=1)
-        sd.wait()
-
-        # Send to diarization API
-        files = {"file": ("audio.wav", audio.tobytes())}
-        data = {"enable_transcription": "true"}
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{DIARIZATION_API}/process-audio",
-                files=files,
-                data=data
-            )
-
-        result = response.json()
-
-        # Process each segment returned
-        for segment in result.get("segments", []):
-            await handle_transcription(segment)
-```
-
-#### 2. Format Transcriptions for Your LLM
-
-**Convert API response to your LLM format:**
-
-```python
-# your_ai_app.py - Format for LLM
-
-async def handle_transcription(segment: dict):
-    """Format transcription and send to LLM"""
-
-    # Format as your structured JSON
-    message = {
-        "method": "voice",
-        "speaker": segment["speaker"],
-        "timestamp": segment["start_time"],  # or use current time
-        "content": segment.get("transcription", "")
-    }
-
-    # Example segment from API:
-    # {
-    #   "speaker": "Andy",
-    #   "start_time": "2025-11-09T12:43:00Z",
-    #   "transcription": "Hey, is anyone home?",
-    #   "emotion_category": "happy",
-    #   "emotion_confidence": 0.87,
-    #   "emotion_arousal": 0.7,
-    #   "emotion_valence": 0.9
-    # }
-
-    # OR for unknown speaker:
-    # {
-    #   "speaker": "Unknown_17627242",
-    #   "start_time": "2025-11-09T12:45:00Z",
-    #   "transcription": "Good mate, you?",
-    #   "emotion_category": "neutral",
-    #   "emotion_confidence": 0.76,
-    #   "emotion_arousal": 0.5,
-    #   "emotion_valence": 0.5
-    # }
-
-    # Decide if this should go to AI
-    if await should_forward_to_ai(message):
-        await send_to_llm(message)
-    else:
-        # Store for potential later retrieval
-        await store_ambient_conversation(message)
-```
-
-#### 3. Intelligent Conversation Routing
-
-**Filter what goes to your main AI (saves cost/latency):**
-
-```python
-# your_ai_app.py - Conversation filter
-
-async def should_forward_to_ai(message: dict) -> bool:
-    """
-    Use small/fast LLM to detect if speech is directed at AI.
-    Only forwards AI-directed speech to main (expensive) LLM.
-    """
-
-    # Use lightweight model (GPT-3.5-turbo, Claude Haiku, etc.)
-    filter_prompt = f"""Is this person talking TO the AI assistant, or having a conversation with someone else?
-
-Speaker: {message['speaker']}
-Said: "{message['content']}"
-
-Reply with only: AI_DIRECTED or AMBIENT_CONVERSATION"""
-
-    result = await lightweight_llm.complete(filter_prompt)
-    return "AI_DIRECTED" in result
-
-async def send_to_llm(message: dict):
-    """Send to main AI for processing"""
-
-    # Your LLM conversation with system prompt
-    response = await main_llm.chat([
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": format_voice_message(message)}
-    ])
-
-    # Respond with voice/text
-    await respond(response)
-```
-
-#### 4. System Prompt for Unknown Speaker Handling
-
-**Add to your AI assistant's system prompt:**
-
-```python
-SYSTEM_PROMPT = """
-You are a helpful AI assistant with access to speaker diarization via MCP tools.
-
-When you detect an unknown speaker (speaker name starts with "Unknown_"):
-1. Ask the user who they are speaking to
-2. When the user identifies the speaker, call the identify_unknown_speaker MCP tool
-3. Greet the newly identified person naturally
-
-Example interaction:
-User says: "Oh, that's Nick"
-You should:
-- Call: identify_unknown_speaker(unknown_speaker_id="Unknown_17627242", real_name="Nick")
-- Respond: "Oh hi Nick! Nice to meet you."
-
-The system will automatically update all past segments from this unknown speaker.
-
-Available MCP tools for speaker management:
-- identify_unknown_speaker(unknown_speaker_id, real_name)
-- get_conversation_transcript(conversation_id)
-- update_speaker(speaker_id, new_name)
-- list_speakers()
-- delete_all_unknown_speakers()
-- search_conversations_by_speaker(speaker_name, limit, skip)
-
-Use these tools when users reference past conversations or update speaker identities.
-"""
-```
-
-#### 5. MCP Tool Calls (On-Demand Only)
-
-**When AI needs to query or update speaker data:**
-
-```python
-# your_ai_app.py - MCP client integration
-
-import httpx
-
-MCP_ENDPOINT = "http://localhost:8000/mcp"
-
-async def call_mcp_tool(tool_name: str, arguments: dict):
-    """Call MCP tool when AI needs it"""
-
-    payload = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/call",
-        "params": {
-            "name": tool_name,
-            "arguments": arguments
-        }
-    }
-
-    async with httpx.AsyncClient() as client:
-        response = await client.post(MCP_ENDPOINT, json=payload)
-
-    return response.json()
-
-# Example 1: User says "that's Nick"
-# Your LLM extracts the intent and calls:
-
-result = await call_mcp_tool(
-    "identify_unknown_speaker",
-    {
-        "unknown_speaker_id": "Unknown_17627242",
-        "real_name": "Nick"
-    }
-)
-# Response: "Updated speaker Unknown_17627242 to Nick. Updated 5 past segments."
-
-# Example 2: User says "what did Nick say about the meeting?"
-# Your LLM calls:
-
-result = await call_mcp_tool(
-    "get_conversation_transcript",
-    {
-        "conversation_id": "3",  # You track which conversation
-        "include_transcription": "true"
-    }
-)
-# Response: Full transcript with all segments, times, speakers
-```
-
-#### 6. Retroactive Context Retrieval
-
-**When user references past conversations:**
-
-```python
-# User says: "I was talking to you earlier about the project"
-
-# Your AI flow:
-# 1. LLM recognizes need for context
-# 2. Calls MCP to get recent conversation
-conversation = await call_mcp_tool(
-    "get_conversation_transcript",
-    {"conversation_id": recent_conversation_id}
-)
-
-# 3. Parse transcript and add to context
+# Get full transcript with speakers
 for segment in conversation["segments"]:
-    if segment["speaker"] == "Andy":
-        context += f"{segment['speaker']}: {segment['transcription']}\n"
-
-# 4. Respond with full context
-# Now AI can answer: "You mentioned the deadline was Friday..."
+    print(f"{segment['speaker_name']}: {segment['text']}")
+    print(f"  Emotion: {segment['emotion_category']} ({segment['emotion_confidence']})")
 ```
 
-#### 7. Conversational Speaker Updates
+### MCP Configuration
 
-**Complete example of the Nick conversation:**
-
-```python
-# Conversation flow in your app:
-
-# [Segment 1 arrives from REST API]
+**Claude Desktop** (`~/.claude/claude_desktop_config.json`):
+```json
 {
-    "speaker": "Andy",
-    "transcription": "Alright mate, how are you doing?",
-    "start_time": "12:43:00"
-}
-→ Send to LLM (no response needed, not directed at AI)
-
-# [Segment 2 arrives]
-{
-    "speaker": "Unknown_17627242",
-    "transcription": "Good mate, you?",
-    "start_time": "12:43:05"
-}
-→ Send to LLM (triggers AI's unknown speaker protocol)
-→ AI responds: "Who are you speaking to?"
-
-# [Segment 3 arrives]
-{
-    "speaker": "Andy",
-    "transcription": "Oh, that's Nick",
-    "start_time": "12:43:10"
-}
-→ Send to LLM
-→ LLM extracts: speaker_id="Unknown_17627242", real_name="Nick"
-→ LLM calls MCP tool:
-await call_mcp_tool(
-    "identify_unknown_speaker",
-    {
-        "unknown_speaker_id": "Unknown_17627242",
-        "real_name": "Nick"
+  "mcpServers": {
+    "speaker-diarization": {
+      "command": "node",
+      "args": ["/path/to/mcp-proxy.js", "http://localhost:8000/mcp"]
     }
-)
-→ AI responds: "Oh hi Nick!"
-
-# [All future segments now show:]
-{
-    "speaker": "Nick",  # ← Updated automatically
-    "transcription": "...",
+  }
 }
 ```
 
----
+**Flowise**: Add MCP node, set URL to `http://localhost:8000/mcp`
 
-### Advanced: Visual Speaker Recognition
+### Key Benefits
 
-**Extend your app with camera-based identification:**
+- **Persistent Identity**: Speakers recognized across all conversations
+- **Zero Re-enrollment**: Identify once, recognized forever
+- **Retroactive Intelligence**: Past segments auto-update when you identify someone
+- **Emotion Context**: AI knows not just "who" but "how" they're feeling
+- **Production Scale**: Handles thousands of conversations with sub-second queries
 
-```python
-# your_ai_app.py - Add visual recognition
-
-async def handle_unknown_speaker(unknown_id: str):
-    """When unknown speaker detected, try visual identification"""
-
-    # 1. Trigger camera (USB webcam, IP camera, etc.)
-    photo = await camera.capture()
-
-    # 2. Send to vision LLM (runs separately, doesn't block main AI)
-    vision_result = await vision_llm.identify_face(photo)
-    # Example: {"name": "Nick", "confidence": 0.92}
-
-    # 3. If high confidence, auto-identify
-    if vision_result.confidence > 0.85:
-        await call_mcp_tool(
-            "identify_unknown_speaker",
-            {
-                "unknown_speaker_id": unknown_id,
-                "real_name": vision_result.name
-            }
-        )
-        await respond(f"Hi {vision_result.name}!")
-    else:
-        # Fall back to asking
-        await respond("Who are you speaking to?")
-
-# Security layer for sensitive commands
-async def verify_before_action(command: str, speaker: str):
-    """Visual verification before executing sensitive commands"""
-
-    if is_sensitive(command):
-        photo = await camera.capture()
-        person = await vision_llm.identify(photo)
-
-        if person.name == speaker and person.confidence > 0.95:
-            await execute_command(command)
-        else:
-            await respond("I need to visually verify it's you first")
-```
-
----
-
-### What's Included vs. What You Build
-
-**✅ Included in this system:**
-- REST API endpoints for audio processing
-- Speaker enrollment and recognition
-- Audio transcription (faster-whisper)
-- Unknown speaker auto-clustering
-- Conversation storage and retrieval
-- MCP server with 10 tools for AI integration
-
-**🔨 You build (your separate application):**
-- Continuous audio recording loop
-- REST API client (sends audio, receives transcriptions)
-- LLM integration (your choice: OpenAI, Anthropic, etc.)
-- Conversation routing/filtering logic
-- Voice output (TTS - text-to-speech)
-- MCP client (calls tools when AI needs them)
-- Camera integration (optional)
-- Visual recognition LLM (optional)
-- Your application-specific logic
-
----
-
-### Example Use Cases
-
-**1. Smart Home Assistant**
-```
-Scenario: Household members interact naturally
-- Continuous recording in main living area
-- Recognizes family members by voice
-- Executes commands only from authorized speakers
-- Asks visitors to identify themselves first
-```
-
-**2. Personal AI Companion**
-```
-Scenario: Always-on conversational assistant
-- Records all conversations (with consent)
-- Maintains context across days/weeks
-- Remembers who said what and when
-- Can be queried: "What did Nick say about the project?"
-```
-
-**3. Meeting Room Assistant**
-```
-Scenario: Automated meeting transcription
-- Identifies all participants as they speak
-- Generates real-time transcript with speaker labels
-- Answers questions: "Who mentioned the deadline?"
-- Creates action items assigned to speakers
-```
-
-**4. Multi-User AI System**
-```
-Scenario: Personalized AI for each user
-- Switches personality/context based on speaker
-- Maintains separate conversation histories
-- Different permissions per user
-- Personalized responses and memory
-```
-
----
-
-### Quick Start Integration
-
-```bash
-# 1. Start this diarization system
-./run_local.sh
-
-# 2. In your AI app, install client libraries
-pip install httpx sounddevice
-
-# 3. Create your AI application with structure above
-# your_ai_app/
-#   ├── main.py              # Continuous recording loop
-#   ├── mcp_client.py        # MCP tool calls
-#   ├── llm_integration.py   # Your LLM (OpenAI/Anthropic/etc)
-#   └── config.py            # API endpoints
-
-# 4. Run your application
-python your_ai_app/main.py
-```
-
-**Minimal working example:**
-
-```python
-# minimal_assistant.py
-
-import httpx
-import sounddevice as sd
-
-async def main():
-    while True:
-        # Record 5 seconds
-        audio = sd.rec(int(5 * 16000), samplerate=16000, channels=1)
-        sd.wait()
-
-        # Send to diarization
-        files = {"file": ("audio.wav", audio.tobytes())}
-        response = httpx.post(
-            "http://localhost:8000/api/v1/process-audio",
-            files=files,
-            data={"enable_transcription": "true"}
-        )
-
-        # Get transcription
-        for segment in response.json().get("segments", []):
-            message = {
-                "speaker": segment["speaker"],
-                "content": segment.get("transcription", "")
-            }
-
-            # Send to your LLM
-            llm_response = await your_llm.chat(message)
-            print(f"AI: {llm_response}")
-```
 
 ## Advanced Features
 

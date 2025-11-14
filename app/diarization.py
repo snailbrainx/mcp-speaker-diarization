@@ -179,10 +179,16 @@ class SpeakerRecognitionEngine:
                 # Load emotion2vec+ model from ModelScope/HuggingFace
                 # Using 'plus_large' for better accuracy (can switch to 'plus_base' for speed)
                 model_name = os.getenv("EMOTION_MODEL", "iic/emotion2vec_plus_large")
+
+                # Try loading from local cache only (offline mode)
+                # Falls back to downloading if not cached
+                use_offline = os.getenv("OFFLINE_MODE", "false").lower() == "true"
+
                 self._emotion_model = AutoModel(
                     model=model_name,
                     hub="hf",  # Use HuggingFace hub (fix for overseas users)
-                    disable_update=True  # Don't auto-update models
+                    disable_update=True,  # Don't auto-update models
+                    local_files_only=use_offline  # True = never download, use cache only
                 )
                 print(f"emotion2vec model loaded successfully ({model_name})")
             except ImportError:
@@ -263,36 +269,14 @@ class SpeakerRecognitionEngine:
         Perform speaker diarization on audio file
 
         Args:
-            audio_file: Path to audio file
+            audio_file: Path to audio file (WAV format)
 
         Returns:
             Diarization result with speaker segments
         """
-        # Convert MP3 to WAV if needed for reliable processing
-        temp_wav_file = None
-        if audio_file.endswith('.mp3'):
-            try:
-                print(f"Converting MP3 to WAV: {audio_file}...")
-                audio = AudioSegment.from_file(audio_file)
-                temp_wav_file = audio_file.rsplit('.', 1)[0] + '_temp_converted.wav'
-                audio.export(temp_wav_file, format='wav')
-                audio_file = temp_wav_file
-                print(f"Conversion successful: {audio_file}")
-            except Exception as e:
-                print(f"Warning: Failed to convert MP3 to WAV: {e}")
-                # Continue with original MP3 file
-
         print(f"Running diarization on {audio_file}...")
-        try:
-            with torch.no_grad():
-                output = self.diarization_pipeline(audio_file)
-        finally:
-            # Clean up temp WAV file if created
-            if temp_wav_file and os.path.exists(temp_wav_file):
-                try:
-                    os.remove(temp_wav_file)
-                except:
-                    pass
+        with torch.no_grad():
+            output = self.diarization_pipeline(audio_file)
 
         # Convert to dictionary format
         segments = []
@@ -363,7 +347,8 @@ class SpeakerRecognitionEngine:
         self,
         emotion_embedding: np.ndarray,
         speaker_emotion_profiles: List[Tuple[str, np.ndarray, Optional[float]]],
-        global_threshold: float = 0.6
+        global_threshold: float = 0.6,
+        speaker_threshold: Optional[float] = None
     ) -> Optional[Tuple[str, float]]:
         """
         Match emotion embedding to speaker's learned emotion profiles
@@ -371,7 +356,8 @@ class SpeakerRecognitionEngine:
         Args:
             emotion_embedding: Emotion embedding to match (1024-D from emotion2vec)
             speaker_emotion_profiles: List of (emotion_category, profile_embedding, custom_threshold) tuples
-            global_threshold: Fallback threshold if profile has no custom threshold
+            global_threshold: Fallback threshold if no speaker/profile threshold set
+            speaker_threshold: Per-speaker emotion threshold (overrides global, overridden by per-emotion)
 
         Returns:
             (emotion_category, confidence) or None if no match above threshold
@@ -387,14 +373,17 @@ class SpeakerRecognitionEngine:
         best_match = None
         best_similarity = 0.0
 
+        # Threshold hierarchy: per-emotion > per-speaker > global
+        default_threshold = speaker_threshold if speaker_threshold is not None else global_threshold
+
         for emotion_cat, profile_emb, custom_threshold in speaker_emotion_profiles:
             # Validate profile embedding
             if np.isnan(profile_emb).any():
                 print(f"  ⚠️  Emotion profile '{emotion_cat}' contains NaN - skipping")
                 continue
 
-            # Use custom threshold if set, otherwise use global
-            threshold = custom_threshold if custom_threshold is not None else global_threshold
+            # Use custom threshold if set, otherwise use speaker/global threshold
+            threshold = custom_threshold if custom_threshold is not None else default_threshold
 
             similarity = cosine_similarity(
                 emotion_embedding.reshape(1, -1),
@@ -432,30 +421,78 @@ class SpeakerRecognitionEngine:
             Segment embedding as numpy array
         """
         from pyannote.core import Segment
-        from pydub import AudioSegment as AudioSeg
         import soundfile as sf
 
-        # Convert MP3 to WAV if needed for reliable processing (same as diarize function)
-        temp_wav_file = None
-        if audio_file.lower().endswith('.mp3'):
-            try:
-                print(f"🔄 Converting MP3 to WAV for embedding extraction: {audio_file}")
-                audio = AudioSeg.from_file(audio_file)
-                temp_wav_file = audio_file.rsplit('.', 1)[0] + '_temp_embed.wav'
-                audio.export(temp_wav_file, format='wav')
-                audio_file = temp_wav_file
-                print(f"✓ Conversion successful: {audio_file}")
-            except Exception as e:
-                print(f"Warning: Failed to convert MP3 to WAV: {e}")
-                # Continue with original MP3 file
+        # Use instance padding if not specified
+        if context_padding is None:
+            context_padding = self.context_padding
 
+        # Get actual audio duration to prevent out-of-bounds
         try:
-            # Use instance padding if not specified
-            if context_padding is None:
-                context_padding = self.context_padding
+            info = sf.info(audio_file)
+            duration = info.duration
 
-            # Get actual audio duration to prevent out-of-bounds
+            # Add context padding for more reliable embeddings
+            padded_start = start_time - context_padding
+            padded_end = end_time + context_padding
+
+            # Clamp times to valid range with small safety margin
+            start_time = max(0, min(padded_start, duration - 0.5))
+            end_time = min(padded_end, duration - 0.01)
+
+            # If start is beyond end after clamping, adjust start
+            if start_time >= end_time:
+                start_time = max(0, end_time - 0.5)
+
+            # Ensure segment is at least 0.1s
+            if end_time - start_time < 0.1:
+                end_time = min(start_time + 0.1, duration - 0.01)
+                if end_time - start_time < 0.1:
+                    start_time = max(0, end_time - 0.1)
+
+        except Exception as e:
+            print(f"Warning: Could not get audio duration, using original times: {e}")
+
+        segment = Segment(start_time, end_time)
+        with torch.no_grad():
+            embedding = self.embedding_model.crop(audio_file, segment)
+        return np.array(embedding)
+
+    def extract_segment_embeddings_batch(
+        self,
+        segments: list,
+        context_padding: float = None
+    ) -> list:
+        """
+        Extract embeddings for multiple segments efficiently (WAV format required)
+
+        Essential for fast speaker embedding recalculation.
+
+        Args:
+            segments: List of dicts with keys: 'audio_file', 'start_time', 'end_time'
+            context_padding: Optional padding override (uses instance default if None)
+
+        Returns:
+            List of embeddings (numpy arrays) in same order as input segments
+            Skips segments that fail extraction (returns None in that position)
+        """
+        from pyannote.core import Segment
+        import soundfile as sf
+
+        embeddings = []
+
+        # Use instance padding if not specified
+        if context_padding is None:
+            context_padding = self.context_padding
+
+        # Extract embeddings from WAV files
+        for seg in segments:
+            audio_file = seg['audio_file']
+            start_time = seg['start_time']
+            end_time = seg['end_time']
+
             try:
+                # Get actual audio duration to prevent out-of-bounds
                 info = sf.info(audio_file)
                 duration = info.duration
 
@@ -477,125 +514,14 @@ class SpeakerRecognitionEngine:
                     if end_time - start_time < 0.1:
                         start_time = max(0, end_time - 0.1)
 
+                segment = Segment(start_time, end_time)
+                with torch.no_grad():
+                    embedding = self.embedding_model.crop(audio_file, segment)
+                embeddings.append(np.array(embedding))
+
             except Exception as e:
-                print(f"Warning: Could not get audio duration, using original times: {e}")
-
-            segment = Segment(start_time, end_time)
-            with torch.no_grad():
-                embedding = self.embedding_model.crop(audio_file, segment)
-            return np.array(embedding)
-
-        finally:
-            # Clean up temp WAV file if created
-            if temp_wav_file and os.path.exists(temp_wav_file):
-                try:
-                    os.remove(temp_wav_file)
-                    print(f"🗑️ Cleaned up temp WAV: {temp_wav_file}")
-                except:
-                    pass
-
-    def extract_segment_embeddings_batch(
-        self,
-        segments: list,
-        context_padding: float = None
-    ) -> list:
-        """
-        Extract embeddings for multiple segments efficiently with MP3→WAV caching
-
-        Prevents redundant conversions when multiple segments use the same audio file.
-        Essential for fast speaker embedding recalculation.
-
-        Args:
-            segments: List of dicts with keys: 'audio_file', 'start_time', 'end_time'
-            context_padding: Optional padding override (uses instance default if None)
-
-        Returns:
-            List of embeddings (numpy arrays) in same order as input segments
-            Skips segments that fail extraction (returns None in that position)
-        """
-        from pyannote.core import Segment
-        from pydub import AudioSegment as AudioSeg
-        import soundfile as sf
-
-        embeddings = []
-        wav_cache = {}  # Maps MP3 path → temp WAV path
-
-        try:
-            # Use instance padding if not specified
-            if context_padding is None:
-                context_padding = self.context_padding
-
-            # Pre-convert all unique MP3 files to WAV
-            unique_mp3s = set()
-            for seg in segments:
-                audio_file = seg['audio_file']
-                if audio_file.lower().endswith('.mp3'):
-                    unique_mp3s.add(audio_file)
-
-            for mp3_file in unique_mp3s:
-                try:
-                    audio = AudioSeg.from_file(mp3_file)
-                    temp_wav = mp3_file.rsplit('.', 1)[0] + '_temp_batch.wav'
-                    audio.export(temp_wav, format='wav')
-                    wav_cache[mp3_file] = temp_wav
-                    print(f"🔄 Batch converted: {os.path.basename(mp3_file)} → WAV (cached for reuse)")
-                except Exception as e:
-                    print(f"⚠️ Failed to convert {os.path.basename(mp3_file)}: {e}")
-                    # Continue without caching - will try with original MP3
-
-            # Extract embeddings using cached WAVs
-            for seg in segments:
-                audio_file = seg['audio_file']
-                start_time = seg['start_time']
-                end_time = seg['end_time']
-
-                # Use cached WAV if available
-                if audio_file in wav_cache:
-                    audio_file = wav_cache[audio_file]
-
-                try:
-                    # Get actual audio duration to prevent out-of-bounds
-                    info = sf.info(audio_file)
-                    duration = info.duration
-
-                    # Add context padding for more reliable embeddings
-                    padded_start = start_time - context_padding
-                    padded_end = end_time + context_padding
-
-                    # Clamp times to valid range with small safety margin
-                    start_time = max(0, min(padded_start, duration - 0.5))
-                    end_time = min(padded_end, duration - 0.01)
-
-                    # If start is beyond end after clamping, adjust start
-                    if start_time >= end_time:
-                        start_time = max(0, end_time - 0.5)
-
-                    # Ensure segment is at least 0.1s
-                    if end_time - start_time < 0.1:
-                        end_time = min(start_time + 0.1, duration - 0.01)
-                        if end_time - start_time < 0.1:
-                            start_time = max(0, end_time - 0.1)
-
-                    segment = Segment(start_time, end_time)
-                    with torch.no_grad():
-                        embedding = self.embedding_model.crop(audio_file, segment)
-                    embeddings.append(np.array(embedding))
-
-                except Exception as e:
-                    print(f"⚠️ Could not extract embedding from {os.path.basename(seg['audio_file'])}: {e}")
-                    embeddings.append(None)
-
-        finally:
-            # Clean up ALL temp WAV files
-            for temp_wav in wav_cache.values():
-                if os.path.exists(temp_wav):
-                    try:
-                        os.remove(temp_wav)
-                    except:
-                        pass
-
-            if wav_cache:
-                print(f"🗑️ Cleaned up {len(wav_cache)} temp WAV files")
+                print(f"⚠️ Could not extract embedding from {os.path.basename(seg['audio_file'])}: {e}")
+                embeddings.append(None)
 
         return embeddings
 
@@ -896,6 +822,7 @@ class SpeakerRecognitionEngine:
             is_known = False
             confidence = 0.0
             embedding = None
+            matched_emotion_from_voice = None  # Will be set if matched via emotion voice profile
 
             # ALWAYS extract embeddings (needed for embedding verification and speaker matching)
             # Check if segment is long enough for embedding extraction
@@ -917,17 +844,28 @@ class SpeakerRecognitionEngine:
                         # Store valid embedding for later use (auto-enrollment or verification)
                         embedding = segment_embedding
 
-                        # Try to match to known speakers if provided
-                        if known_speakers:
+                        # NEW: Enhanced matching against ALL voice profiles (general + emotion-specific)
+                        if db_session:
+                            enhanced_match = self.match_speaker_with_all_profiles(
+                                segment_embedding,
+                                db_session,
+                                threshold=threshold
+                            )
+
+                            if enhanced_match:
+                                speaker_name = enhanced_match['speaker_name']
+                                confidence = enhanced_match['confidence']
+                                is_known = True
+                                matched_emotion_from_voice = enhanced_match.get('matched_emotion')  # May be None
+                                # Keep embedding for caching
+                        elif known_speakers:
+                            # Fallback to old method if no db_session
                             match = self.match_speaker(segment_embedding, known_speakers, threshold)
                             if match:
                                 _, speaker_name, confidence = match
                                 is_known = True
                                 print(f"Matched segment to {speaker_name} with confidence {confidence:.2%}")
-                                embedding = None  # Don't return embedding for known speakers
-                            else:
-                                print(f"No match found for segment (threshold: {threshold})")
-                                # Keep embedding for auto-enrollment
+                                # Keep embedding for caching
                 except RuntimeError as e:
                     error_str = str(e)
                     if "Kernel size" in error_str or "input size" in error_str:
@@ -944,12 +882,17 @@ class SpeakerRecognitionEngine:
                         raise
 
             # If still not matched to known speaker (or embedding failed), map to Unknown_XX
-            if not is_known and speaker_label:
-                # Create consistent mapping from diarization label to Unknown_XX
-                if speaker_label not in unknown_speaker_map:
-                    unknown_speaker_map[speaker_label] = f"Unknown_{unknown_counter:02d}"
+            if not is_known:
+                if speaker_label:
+                    # Create consistent mapping from diarization label to Unknown_XX
+                    if speaker_label not in unknown_speaker_map:
+                        unknown_speaker_map[speaker_label] = f"Unknown_{unknown_counter:02d}"
+                        unknown_counter += 1
+                    speaker_name = unknown_speaker_map[speaker_label]
+                else:
+                    # No speaker label at all - create generic unknown
+                    speaker_name = f"Unknown_{unknown_counter:02d}"
                     unknown_counter += 1
-                speaker_name = unknown_speaker_map[speaker_label]
 
             # Extract emotion for this segment (with embeddings for personalized matching)
             # Feature flag for personalized emotions
@@ -962,8 +905,39 @@ class SpeakerRecognitionEngine:
                 extract_embedding=ENABLE_PERSONALIZED_EMOTIONS  # Extract embeddings if personalization enabled
             )
 
-            # Personalized emotion matching (if enabled and speaker has profiles)
-            if emotion_data and ENABLE_PERSONALIZED_EMOTIONS and is_known and db_session:
+            # NEW: If we matched via emotion voice profile, use that as primary signal
+            if matched_emotion_from_voice is not None and emotion_data:
+                print(f"  🎯 Voice profile match indicates emotion: {matched_emotion_from_voice}")
+
+                # Create detector breakdown showing voice match as primary
+                emotion_data['detector_breakdown'] = {
+                    'emotion2vec_detector': {
+                        'emotion': emotion_data['emotion_category'],
+                        'confidence': float(emotion_data.get('emotion_confidence', 0.0))
+                    },
+                    'voice_profile_detector': {
+                        'emotion': matched_emotion_from_voice,
+                        'confidence': float(confidence)  # Use speaker match confidence
+                    },
+                    'final_decision': {
+                        'emotion': matched_emotion_from_voice,
+                        'confidence': float(confidence),
+                        'reason': f'Matched {speaker_name}_{matched_emotion_from_voice} voice profile',
+                        'voice_profile_available': True
+                    }
+                }
+
+                # Override emotion with voice profile match
+                emotion_data['emotion_category'] = matched_emotion_from_voice
+                emotion_data['emotion_confidence'] = float(confidence)  # Convert to Python float
+
+                print(f"  🔬 Enhanced Match Results:")
+                print(f"     emotion2vec: {emotion_data['detector_breakdown']['emotion2vec_detector']['emotion']} ({emotion_data['detector_breakdown']['emotion2vec_detector']['confidence']:.2%})")
+                print(f"     Voice profile: {matched_emotion_from_voice} ({confidence:.2%})")
+                print(f"     Final: {matched_emotion_from_voice} - Matched emotion voice profile")
+
+            # Personalized emotion matching (if enabled and speaker has profiles and NOT already matched via voice)
+            elif emotion_data and ENABLE_PERSONALIZED_EMOTIONS and is_known and db_session:
                 emotion_embedding = emotion_data.get('embedding')
 
                 if emotion_embedding is not None:
@@ -975,35 +949,39 @@ class SpeakerRecognitionEngine:
                         speaker = db_session.query(Speaker).filter(Speaker.name == speaker_name).first()
 
                         if speaker and speaker.emotion_profiles:
-                            # Build profile list: (emotion_category, embedding, custom_threshold)
-                            profiles = []
-                            for prof in speaker.emotion_profiles:
-                                profiles.append((
-                                    prof.emotion_category,
-                                    prof.get_embedding(),
-                                    prof.confidence_threshold  # Can be None
-                                ))
-
                             # Get global emotion threshold
                             from .config import get_config
                             global_threshold = get_config().get_settings().emotion_threshold
 
-                            # Try to match to speaker's learned emotions
-                            match = self.match_emotion_to_profile(
-                                emotion_embedding,
-                                profiles,
-                                global_threshold
+                            # NEW: DUAL-DETECTOR MATCHING (emotion2vec + voice profile)
+                            # Use both embeddings for better accuracy
+                            voice_emb = embedding  # Voice embedding from pyannote (already extracted)
+
+                            dual_result = self.match_emotion_dual_detector(
+                                emotion_embedding=emotion_embedding,
+                                voice_embedding=voice_emb,
+                                speaker_emotion_profiles=speaker.emotion_profiles,  # Pass full objects
+                                global_threshold=global_threshold,
+                                speaker_threshold=speaker.emotion_threshold,
+                                generic_emotion=emotion_data['emotion_category'],
+                                generic_confidence=emotion_data['emotion_confidence']
                             )
 
-                            if match:
-                                matched_emotion, personalized_confidence = match
-                                print(f"  ✓ Personalized emotion match: {matched_emotion} ({personalized_confidence:.2%})")
-                                # Use personalized result
-                                emotion_data['emotion_category'] = matched_emotion
-                                emotion_data['emotion_confidence'] = personalized_confidence
+                            # Use final decision from dual-detector
+                            final = dual_result['final_decision']
+                            emotion_data['emotion_category'] = final['emotion']
+                            emotion_data['emotion_confidence'] = final['confidence']
+
+                            # Store detector breakdown for frontend display
+                            emotion_data['detector_breakdown'] = dual_result
+
+                            print(f"  🔬 Dual-Detector Results:")
+                            print(f"     Detector 1 (emotion2vec): {dual_result['emotion2vec_detector']['emotion']} ({dual_result['emotion2vec_detector']['confidence']:.2%})")
+                            if dual_result['voice_profile_detector']:
+                                print(f"     Detector 2 (voice profile): {dual_result['voice_profile_detector']['emotion']} ({dual_result['voice_profile_detector']['confidence']:.2%})")
                             else:
-                                print(f"  No personalized emotion match - using generic detection")
-                                # Keep generic emotion2vec result
+                                print(f"     Detector 2 (voice profile): Not available")
+                            print(f"     Final: {final['emotion']} ({final['confidence']:.2%}) - {final['reason']}")
 
                     except Exception as e:
                         print(f"  Warning: Personalized emotion matching failed: {e}")
@@ -1016,19 +994,22 @@ class SpeakerRecognitionEngine:
                 "speaker": speaker_name,
                 "speaker_label": speaker_label,
                 "is_known": is_known,
-                "confidence": confidence,
+                "confidence": float(confidence) if confidence is not None else 0.0,  # Convert to Python float
                 "embedding": embedding,  # Include embedding for unknown speakers
                 "words": trans_seg.get("words", []),  # Include word-level data
                 "avg_logprob": trans_seg.get("avg_logprob")  # Include segment confidence
             }
 
-            # Add emotion data if available (remove embedding before storing)
+            # Add emotion data if available (include embedding for caching)
             if emotion_data:
+                # Ensure all numeric values are Python native types for JSON serialization
+                emotion_conf = emotion_data.get("emotion_confidence")
                 segment_data.update({
                     "emotion_category": emotion_data.get("emotion_category"),
-                    "emotion_confidence": emotion_data.get("emotion_confidence")
+                    "emotion_confidence": float(emotion_conf) if emotion_conf is not None else None,
+                    "emotion_embedding": emotion_data.get("embedding"),  # Store for fast recalculation
+                    "detector_breakdown": emotion_data.get("detector_breakdown")  # NEW: Dual-detector results
                 })
-                # Don't include 'embedding' in segment_data (only used for matching)
 
             transcribed_with_speakers.append(segment_data)
 
@@ -1036,3 +1017,203 @@ class SpeakerRecognitionEngine:
             "segments": transcribed_with_speakers,
             "num_speakers": diarization_result["num_speakers"]
         }
+
+    def match_speaker_with_all_profiles(self, segment_embedding, db_session, threshold=0.35):
+        """
+        Enhanced speaker matching that checks ALL voice profiles (general + emotion-specific).
+
+        This matches against:
+        1. Speaker's general voice profile
+        2. ALL speaker emotion voice profiles (Andy_angry, Andy_happy, etc.)
+
+        Returns best match with speaker AND emotion info.
+        """
+        if db_session is None:
+            return None
+
+        import numpy as np
+        from sklearn.metrics.pairwise import cosine_similarity
+        from .models import Speaker, SpeakerEmotionProfile
+
+        best_match = None
+        best_similarity = threshold
+
+        # Get all speakers
+        speakers = db_session.query(Speaker).all()
+
+        all_profiles = []  # List of (speaker_id, speaker_name, embedding, emotion_or_none)
+
+        for speaker in speakers:
+            # 1. Add general speaker profile
+            general_emb = speaker.get_embedding()
+            if general_emb is not None and not np.isnan(general_emb).any():
+                all_profiles.append({
+                    'speaker_id': speaker.id,
+                    'speaker_name': speaker.name,
+                    'embedding': general_emb,
+                    'emotion': None,  # General profile
+                    'profile_type': 'general'
+                })
+
+            # 2. Add ALL emotion voice profiles for this speaker
+            for emotion_profile in speaker.emotion_profiles:
+                voice_emb = emotion_profile.get_voice_embedding()
+                # Only include if we have enough samples (3+)
+                if (voice_emb is not None and
+                    not np.isnan(voice_emb).any() and
+                    emotion_profile.voice_sample_count >= 3):
+                    all_profiles.append({
+                        'speaker_id': speaker.id,
+                        'speaker_name': speaker.name,
+                        'embedding': voice_emb,
+                        'emotion': emotion_profile.emotion_category,
+                        'profile_type': 'emotion_voice',
+                        'sample_count': emotion_profile.voice_sample_count
+                    })
+
+        print(f"  🔍 Checking against {len(all_profiles)} voice profiles (general + emotion-specific)")
+
+        # Match against ALL profiles
+        for profile in all_profiles:
+            similarity = cosine_similarity(
+                segment_embedding.reshape(1, -1),
+                profile['embedding'].reshape(1, -1)
+            )[0][0]
+
+            profile_desc = f"{profile['speaker_name']}"
+            if profile['emotion']:
+                profile_desc += f"_{profile['emotion']} ({profile['sample_count']} voice samples)"
+
+            print(f"    - {profile_desc}: {similarity:.4f}")
+
+            if similarity > best_similarity:
+                best_similarity = similarity
+                best_match = {
+                    'speaker_id': profile['speaker_id'],
+                    'speaker_name': profile['speaker_name'],
+                    'confidence': float(similarity),  # Convert numpy type to Python float
+                    'matched_emotion': profile['emotion'],  # None if general, emotion name if emotion profile
+                    'profile_type': profile['profile_type']
+                }
+
+        if best_match:
+            if best_match['matched_emotion']:
+                print(f"  ✅ BEST MATCH: {best_match['speaker_name']}_{best_match['matched_emotion']} ({best_match['confidence']:.2%}) - Emotion voice profile")
+            else:
+                print(f"  ✅ BEST MATCH: {best_match['speaker_name']} ({best_match['confidence']:.2%}) - General profile")
+        else:
+            print(f"  ❌ No match found above threshold {threshold:.2%}")
+
+        return best_match
+
+    def match_emotion_dual_detector(
+        self,
+        emotion_embedding,
+        voice_embedding,
+        speaker_emotion_profiles,
+        global_threshold=0.6,
+        speaker_threshold=None,
+        generic_emotion="neutral",
+        generic_confidence=0.0
+    ):
+        """Dual-detector emotion matching using both emotion2vec and voice profiles"""
+        import numpy as np
+        from sklearn.metrics.pairwise import cosine_similarity
+
+        # Validate inputs
+        if np.isnan(emotion_embedding).any() or np.isnan(voice_embedding).any():
+            return {
+                "emotion2vec_detector": {"emotion": generic_emotion, "confidence": float(generic_confidence)},
+                "voice_profile_detector": None,
+                "final_decision": {"emotion": generic_emotion, "confidence": float(generic_confidence), "reason": "Invalid embeddings", "voice_profile_available": False}
+            }
+
+        if not speaker_emotion_profiles:
+            return {
+                "emotion2vec_detector": {"emotion": generic_emotion, "confidence": float(generic_confidence)},
+                "voice_profile_detector": None,
+                "final_decision": {"emotion": generic_emotion, "confidence": float(generic_confidence), "reason": "No profiles", "voice_profile_available": False}
+            }
+
+        # Get SPEAKER_THRESHOLD for voice profile matching (512-D embeddings)
+        from .config import get_config
+        config = get_config()
+        settings = config.get_settings()
+        default_speaker_threshold = settings.speaker_threshold
+
+        # DETECTOR 1: emotion2vec (uses EMOTION_THRESHOLD for 1024-D embeddings)
+        detector1_best = None
+        detector1_confidence = 0.0
+        default_emotion_threshold = speaker_threshold if speaker_threshold is not None else global_threshold
+        
+        for profile in speaker_emotion_profiles:
+            profile_emb = profile.get_embedding()
+            if profile_emb is None or np.isnan(profile_emb).any():
+                continue
+
+            threshold = profile.confidence_threshold if profile.confidence_threshold is not None else default_emotion_threshold
+            similarity = cosine_similarity(emotion_embedding.reshape(1, -1), profile_emb.reshape(1, -1))[0][0]
+
+            if similarity > threshold and similarity > detector1_confidence:
+                detector1_confidence = similarity
+                detector1_best = profile.emotion_category
+        
+        detector1_result = {
+            "emotion": detector1_best or generic_emotion,
+            "confidence": float(detector1_confidence) if detector1_best else float(generic_confidence)
+        }
+
+        # DETECTOR 2: Voice profile (uses SPEAKER_THRESHOLD for 512-D embeddings)
+        voice_matches = []
+        voice_best = None
+        voice_best_confidence = 0.0
+        MIN_VOICE_SAMPLES = 3
+
+        for profile in speaker_emotion_profiles:
+            voice_emb = profile.get_voice_embedding()
+            if voice_emb is None or np.isnan(voice_emb).any() or profile.voice_sample_count < MIN_VOICE_SAMPLES:
+                continue
+
+            voice_threshold = profile.voice_threshold if profile.voice_threshold is not None else default_speaker_threshold
+            voice_sim = cosine_similarity(voice_embedding.reshape(1, -1), voice_emb.reshape(1, -1))[0][0]
+
+            voice_matches.append({
+                "emotion": profile.emotion_category,
+                "similarity": float(voice_sim),
+                "threshold": float(voice_threshold),
+                "samples": profile.voice_sample_count
+            })
+
+            if voice_sim > voice_threshold and voice_sim > voice_best_confidence:
+                voice_best_confidence = voice_sim
+                voice_best = profile.emotion_category
+
+        detector2_result = {
+            "emotion": voice_best or "neutral",
+            "confidence": float(voice_best_confidence),
+            "matches": voice_matches
+        }
+
+        # COMBINE
+        d1_emotion = detector1_result["emotion"]
+        d1_conf = detector1_result["confidence"]
+        d2_emotion = detector2_result["emotion"]
+        d2_conf = detector2_result["confidence"]
+
+        if d1_emotion == d2_emotion and d1_conf > 0.70 and d2_conf > 0.80:
+            final = {"emotion": d1_emotion, "confidence": float((d1_conf + d2_conf) / 2), "reason": "Both agree", "voice_profile_available": True}
+        elif d1_emotion == "neutral" or d1_emotion == "<unk>":
+            final = {"emotion": "neutral", "confidence": float(d1_conf), "reason": "emotion2vec neutral", "voice_profile_available": len(voice_matches) > 0}
+        elif d2_conf > 0.85:
+            final = {"emotion": d2_emotion, "confidence": float(d2_conf), "reason": f"Voice strong: {d2_emotion}", "voice_profile_available": True}
+        elif d1_emotion != d2_emotion:
+            final = {"emotion": "neutral", "confidence": float(max(d1_conf, d2_conf)), "reason": f"Disagree: {d1_emotion} vs {d2_emotion}", "voice_profile_available": len(voice_matches) > 0}
+        else:
+            final = {"emotion": d1_emotion, "confidence": float(d1_conf), "reason": "Agree low conf", "voice_profile_available": len(voice_matches) > 0}
+
+        return {
+            "emotion2vec_detector": detector1_result,
+            "voice_profile_detector": detector2_result if len(voice_matches) > 0 else None,
+            "final_decision": final
+        }
+

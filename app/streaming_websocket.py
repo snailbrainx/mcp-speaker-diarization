@@ -13,9 +13,22 @@ from typing import Dict, Optional
 from .database import get_db
 from .models import Conversation, ConversationSegment, Speaker
 from .streaming_recorder import StreamingRecorder
-from .audio_utils import convert_to_mp3
 from .config import get_config
 import os
+
+
+def convert_numpy_to_native(obj):
+    """Recursively convert numpy types to Python native types for JSON serialization"""
+    if isinstance(obj, dict):
+        return {key: convert_numpy_to_native(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_numpy_to_native(item) for item in obj]
+    elif isinstance(obj, (np.integer, np.floating)):
+        return float(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    else:
+        return obj
 
 router = APIRouter(prefix="/streaming", tags=["Streaming"])
 
@@ -37,14 +50,24 @@ async def send_message(websocket: WebSocket, message_type: str, data: dict):
     try:
         # Check if WebSocket is still connected
         if websocket.client_state.CONNECTED:
-            await websocket.send_json({
+            message = {
                 "type": message_type,
                 "data": data,
                 "timestamp": datetime.utcnow().isoformat()
-            })
+            }
+            print(f"🔌 Sending WebSocket message: type={message_type}, data_keys={list(data.keys()) if isinstance(data, dict) else 'not-dict'}")
+            await websocket.send_json(message)
+            print(f"✅ Successfully sent {message_type} message")
+        else:
+            print(f"⚪ WebSocket not connected, skipping {message_type} message")
+    except WebSocketDisconnect:
+        # Expected during stop/cleanup - client disconnected before we could send
+        print(f"⚪ Client disconnected, skipping {message_type} message (expected during shutdown)")
     except Exception as e:
-        # Silently fail if connection is closed
-        pass
+        # Unexpected errors
+        print(f"❌ ERROR sending {message_type} message: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 @router.websocket("/ws")
@@ -246,6 +269,8 @@ async def _handle_segment_processed(
         conv_start = conversation.start_time
         segments_data = []
 
+        print(f"📝 Processing {len(result['segments'])} segment(s) from transcription")
+
         for seg in result["segments"]:
             # Determine speaker
             speaker_id = None
@@ -259,7 +284,7 @@ async def _handle_segment_processed(
             else:
                 # Auto-enroll unknown speakers with embeddings (enables clustering)
                 embedding = seg.get("embedding")
-                if embedding is not None and speaker_name.startswith("Unknown_"):
+                if embedding is not None and speaker_name and speaker_name.startswith("Unknown_"):
                     from .diarization import auto_enroll_unknown_speaker
                     speaker_id, speaker_name = auto_enroll_unknown_speaker(
                         embedding, db, threshold=threshold
@@ -288,22 +313,35 @@ async def _handle_segment_processed(
                 confidence=confidence,
                 emotion_category=seg.get("emotion_category"),
                 emotion_confidence=seg.get("emotion_confidence"),
+                detector_breakdown=json.dumps(seg["detector_breakdown"]) if seg.get("detector_breakdown") else None,
                 segment_audio_path=segment_file,
                 words_data=words_json,
                 avg_logprob=seg.get("avg_logprob")
             )
+
+            # Store embeddings for fast recalculation (no audio re-extraction needed)
+            if seg.get("embedding") is not None:
+                segment.set_speaker_embedding(seg["embedding"])
+            if seg.get("emotion_embedding") is not None:
+                segment.set_emotion_embedding(seg["emotion_embedding"])
+
             db.add(segment)
             db.flush()
+
+            # Ensure all numeric values are Python native types for JSON serialization
+            emotion_conf = seg.get("emotion_confidence")
+            detector_breakdown = seg.get("detector_breakdown")
 
             segments_data.append({
                 "segment_id": segment.id,
                 "speaker_name": speaker_name,
                 "text": seg["text"],
-                "start_offset": seg_start_offset,
-                "end_offset": seg_end_offset,
-                "confidence": confidence,
+                "start_offset": float(seg_start_offset),
+                "end_offset": float(seg_end_offset),
+                "confidence": float(confidence) if confidence is not None else 0.0,
                 "emotion_category": seg.get("emotion_category"),
-                "emotion_confidence": seg.get("emotion_confidence"),
+                "emotion_confidence": float(emotion_conf) if emotion_conf is not None else None,
+                "detector_breakdown": convert_numpy_to_native(detector_breakdown) if detector_breakdown else None,
                 "is_known": seg.get("is_known", False),
                 "words": seg.get("words", []),  # Include word-level data
                 "avg_logprob": seg.get("avg_logprob")
@@ -317,7 +355,9 @@ async def _handle_segment_processed(
         db.commit()
 
         # Send segments to client
+        print(f"📤 Sending {len(segments_data)} segment(s) to frontend")
         for seg_data in segments_data:
+            print(f"   → Segment: {seg_data['speaker_name']}: {seg_data['text'][:50]}...")
             await send_message(websocket, "segment", seg_data)
 
         # Clear GPU cache
@@ -348,15 +388,9 @@ async def _finalize_recording(
         full_audio_path = recorder.concatenate_segments()
 
         if full_audio_path and os.path.exists(full_audio_path):
-            # Convert to MP3
-            try:
-                mp3_path = convert_to_mp3(full_audio_path, delete_original=True)
-                conversation.audio_path = mp3_path
-                conversation.audio_format = "mp3"
-            except Exception as e:
-                print(f"MP3 conversion failed: {e}, keeping WAV")
-                conversation.audio_path = full_audio_path
-                conversation.audio_format = "wav"
+            # Keep WAV file (no MP3 conversion - WAV avoids pyannote 24ms boundary bug)
+            conversation.audio_path = full_audio_path
+            conversation.audio_format = "wav"
 
         # Update conversation status
         conversation.status = "completed"

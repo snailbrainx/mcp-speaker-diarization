@@ -89,6 +89,25 @@ def init_db():
             except Exception as e:
                 print(f"Note: Could not add emotion_misidentified column: {e}")
 
+        # Add cached embedding columns if missing (for fast recalculation)
+        if 'speaker_embedding' not in existing_columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE conversation_segments ADD COLUMN speaker_embedding BLOB"))
+                    conn.commit()
+                    print("✓ Added speaker_embedding column to conversation_segments")
+            except Exception as e:
+                print(f"Note: Could not add speaker_embedding column: {e}")
+
+        if 'emotion_embedding' not in existing_columns:
+            try:
+                with engine.connect() as conn:
+                    conn.execute(text("ALTER TABLE conversation_segments ADD COLUMN emotion_embedding BLOB"))
+                    conn.commit()
+                    print("✓ Added emotion_embedding column to conversation_segments")
+            except Exception as e:
+                print(f"Note: Could not add emotion_embedding column: {e}")
+
     # Check speakers table for missing columns
     if 'speakers' in inspector.get_table_names():
         existing_columns = [col['name'] for col in inspector.get_columns('speakers')]

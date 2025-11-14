@@ -72,11 +72,15 @@ def save_current_state(profile_name: str, description: str, db: Session):
         # Export emotion profiles for this speaker
         emotion_profiles = []
         for prof in speaker.emotion_profiles:
+            voice_emb = prof.get_voice_embedding()
             emotion_profiles.append({
                 "emotion_category": prof.emotion_category,
                 "embedding": prof.get_embedding().tolist(),
                 "sample_count": prof.sample_count,
-                "confidence_threshold": prof.confidence_threshold
+                "confidence_threshold": prof.confidence_threshold,
+                "voice_embedding": voice_emb.tolist() if voice_emb is not None else None,
+                "voice_sample_count": prof.voice_sample_count,
+                "voice_threshold": prof.voice_threshold
             })
 
         profile_data["speakers"].append({
@@ -458,11 +462,16 @@ async def restore_from_file(filename: str, db: Session = Depends(get_db)):
                     speaker_id=speaker.id,
                     emotion_category=prof_data["emotion_category"],
                     sample_count=prof_data.get("sample_count", 1),
-                    confidence_threshold=prof_data.get("confidence_threshold")
+                    confidence_threshold=prof_data.get("confidence_threshold"),
+                    voice_sample_count=prof_data.get("voice_sample_count", 0),
+                    voice_threshold=prof_data.get("voice_threshold")
                 )
                 if prof_data.get("embedding"):
                     emb = np.array(prof_data["embedding"], dtype=np.float32)
                     profile.set_embedding(emb)
+                if prof_data.get("voice_embedding"):
+                    voice_emb = np.array(prof_data["voice_embedding"], dtype=np.float32)
+                    profile.set_voice_embedding(voice_emb)
                 db.add(profile)
 
             speakers_restored += 1

@@ -1,6 +1,7 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import List, Optional
 from datetime import datetime
+import json
 
 class SpeakerBase(BaseModel):
     name: str
@@ -64,6 +65,25 @@ class Word(BaseModel):
     end: float
     probability: float
 
+# Dual-detector emotion breakdown schemas
+class EmotionDetectorResult(BaseModel):
+    """Result from a single emotion detector"""
+    emotion: str
+    confidence: float
+    all_scores: Optional[dict] = None
+
+class EmotionFinalDecision(BaseModel):
+    """Final emotion decision with reasoning"""
+    emotion: str
+    reasoning: str
+    voice_profile_available: bool
+
+class EmotionDetectorBreakdown(BaseModel):
+    """Breakdown of dual-detector emotion system"""
+    emotion2vec_detector: EmotionDetectorResult
+    voice_profile_detector: Optional[EmotionDetectorResult]
+    final_decision: EmotionFinalDecision
+
 class ConversationSegmentResponse(BaseModel):
     id: int
     conversation_id: int
@@ -77,9 +97,39 @@ class ConversationSegmentResponse(BaseModel):
     confidence: Optional[float]
     emotion_category: Optional[str] = None
     emotion_confidence: Optional[float] = None
+    emotion_corrected: bool = False
+    emotion_corrected_at: Optional[datetime] = None
+    emotion_misidentified: bool = False
+    detector_breakdown: Optional[dict] = None  # JSON field for detector breakdown
     words: Optional[List[Word]] = None
     avg_logprob: Optional[float] = None
     is_misidentified: bool = False
+
+    @field_validator('detector_breakdown', mode='before')
+    @classmethod
+    def parse_detector_breakdown(cls, v):
+        """Parse JSON string to dict if needed"""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return None
+        return v
+
+    @field_validator('words', mode='before')
+    @classmethod
+    def parse_words(cls, v):
+        """Parse JSON string words_data to List[Word] if needed"""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except (json.JSONDecodeError, TypeError):
+                return None
+        return v
 
     class Config:
         from_attributes = True

@@ -25,7 +25,6 @@ from .schemas import (
     ToggleMisidentifiedRequest
 )
 from .diarization import SpeakerRecognitionEngine
-from .audio_utils import convert_to_mp3, batch_convert_to_mp3
 from .api import get_engine
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
@@ -178,6 +177,17 @@ async def reprocess_conversation(
             speaker = db.query(Speaker).filter(Speaker.name == speaker_name).first()
             if speaker:
                 speaker_id = speaker.id
+        else:
+            # Auto-enroll unknown speakers with embeddings (same as initial processing)
+            # This ensures reprocessed unknowns are enrolled and can be identified later
+            embedding = seg.get("embedding")
+            if embedding is not None and speaker_name and speaker_name.startswith("Unknown_"):
+                from .diarization import auto_enroll_unknown_speaker
+                speaker_id, speaker_name = auto_enroll_unknown_speaker(
+                    embedding, db, threshold=threshold
+                )
+                # Update confidence since we're using the enrolled speaker
+                confidence = 1.0 if speaker_id else confidence
 
         # Serialize word-level data if available
         words_json = json.dumps(seg["words"]) if seg.get("words") else None
@@ -194,9 +204,17 @@ async def reprocess_conversation(
             confidence=confidence,
             emotion_category=seg.get("emotion_category"),
             emotion_confidence=seg.get("emotion_confidence"),
+            detector_breakdown=json.dumps(seg["detector_breakdown"]) if seg.get("detector_breakdown") else None,
             words_data=words_json,  # Include word-level confidence
             avg_logprob=seg.get("avg_logprob")
         )
+
+        # Store embeddings for fast recalculation (no audio re-extraction needed)
+        if seg.get("embedding") is not None:
+            segment.set_speaker_embedding(seg["embedding"])
+        if seg.get("emotion_embedding") is not None:
+            segment.set_emotion_embedding(seg["emotion_embedding"])
+
         db.add(segment)
 
     # Update conversation stats
@@ -210,6 +228,118 @@ async def reprocess_conversation(
     engine.clear_gpu_cache()
 
     return {"message": "Conversation reprocessed", "segments": len(result["segments"])}
+
+
+@router.post("/{conversation_id}/recalculate-emotions")
+async def recalculate_emotions(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    engine: SpeakerRecognitionEngine = Depends(get_engine)
+):
+    """
+    Recalculate emotions for all segments using current emotion profiles
+    WITHOUT re-running diarization or transcription (preserves manual work)
+    """
+    conversation = db.query(Conversation).filter(
+        Conversation.id == conversation_id
+    ).first()
+
+    if not conversation:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    if not conversation.audio_path or not os.path.exists(conversation.audio_path):
+        raise HTTPException(status_code=404, detail="Audio file not found")
+
+    # Get all segments for this conversation
+    segments = db.query(ConversationSegment).filter(
+        ConversationSegment.conversation_id == conversation_id
+    ).all()
+
+    updated_count = 0
+    skipped_count = 0
+
+    for segment in segments:
+        # Skip if no speaker or manually corrected (respect user corrections)
+        if not segment.speaker_id or segment.emotion_corrected:
+            skipped_count += 1
+            continue
+
+        # Skip if no audio available
+        audio_file = conversation.audio_path
+        if not audio_file or not os.path.exists(audio_file):
+            skipped_count += 1
+            continue
+
+        try:
+            # Re-extract emotion with personalized matching
+            emotion_data = engine.extract_emotion(
+                audio_file,
+                segment.start_offset,
+                segment.end_offset,
+                extract_embedding=True
+            )
+
+            if not emotion_data:
+                skipped_count += 1
+                continue
+
+            # Get speaker and their profiles
+            from .models import Speaker
+            speaker = db.query(Speaker).filter(Speaker.id == segment.speaker_id).first()
+
+            if speaker and speaker.emotion_profiles:
+                # Use dual-detector matching if profiles exist
+                voice_emb = segment.get_speaker_embedding()
+                emotion_emb = emotion_data.get('embedding')
+
+                if voice_emb is not None and emotion_emb is not None:
+                    from .config import get_config
+                    global_threshold = get_config().get_settings().emotion_threshold
+
+                    dual_result = engine.match_emotion_dual_detector(
+                        emotion_embedding=emotion_emb,
+                        voice_embedding=voice_emb,
+                        speaker_emotion_profiles=speaker.emotion_profiles,
+                        global_threshold=global_threshold,
+                        speaker_threshold=speaker.emotion_threshold,
+                        generic_emotion=emotion_data['emotion_category'],
+                        generic_confidence=emotion_data['emotion_confidence']
+                    )
+
+                    # Update segment with final decision
+                    final = dual_result['final_decision']
+                    segment.emotion_category = final['emotion']
+                    segment.emotion_confidence = final['confidence']
+                    segment.detector_breakdown = json.dumps(dual_result)  # Store breakdown for frontend
+                    updated_count += 1
+                else:
+                    # Fall back to generic emotion2vec result
+                    segment.emotion_category = emotion_data['emotion_category']
+                    segment.emotion_confidence = emotion_data['emotion_confidence']
+                    segment.detector_breakdown = None  # No dual-detector used
+                    updated_count += 1
+            else:
+                # No profiles, use generic emotion2vec result
+                segment.emotion_category = emotion_data['emotion_category']
+                segment.emotion_confidence = emotion_data['emotion_confidence']
+                segment.detector_breakdown = None  # No dual-detector used
+                updated_count += 1
+
+        except Exception as e:
+            print(f"Warning: Failed to recalculate emotion for segment {segment.id}: {e}")
+            skipped_count += 1
+
+    db.commit()
+
+    # Clear GPU cache
+    engine.clear_gpu_cache()
+
+    return {
+        "message": "Emotions recalculated",
+        "updated": updated_count,
+        "skipped": skipped_count,
+        "total": len(segments)
+    }
 
 
 @router.post("/{conversation_id}/segments/{segment_id}/identify")
@@ -344,37 +474,45 @@ async def identify_speaker_in_segment(
     if speaker_segments:
         import numpy as np
 
-        # Prepare batch extraction input
-        batch_segments = []
+        # Collect embeddings (use stored if available, extract from audio otherwise)
+        embeddings = []
+        batch_segments = []  # Only for segments without stored embeddings
+
         for seg in speaker_segments:
-            conv = seg.conversation
+            # Try to use stored embedding first (FAST - no audio extraction needed!)
+            stored_embedding = seg.get_speaker_embedding()
+            if stored_embedding is not None and not np.isnan(stored_embedding).any():
+                embeddings.append(stored_embedding)
+                print(f"  ✓ Using cached embedding for segment {seg.id}")
+            else:
+                # Need to extract from audio (SLOW - fallback only)
+                conv = seg.conversation
 
-            # CRITICAL: Prefer full conversation audio over segment audio!
-            # Database offsets (start_offset/end_offset) are CONVERSATION-RELATIVE.
-            # Segment audio files (seg_0001.wav) are individual clips with different offsets.
-            # Using segment audio file with conversation-relative offsets extracts WRONG audio!
-            seg_audio = conv.audio_path if conv.audio_path and os.path.exists(conv.audio_path) else None
+                # CRITICAL: Prefer full conversation audio over segment audio!
+                # Database offsets (start_offset/end_offset) are CONVERSATION-RELATIVE.
+                # Segment audio files (seg_0001.wav) are individual clips with different offsets.
+                # Using segment audio file with conversation-relative offsets extracts WRONG audio!
+                seg_audio = conv.audio_path if conv.audio_path and os.path.exists(conv.audio_path) else None
 
-            # Fallback to segment audio only if no conversation audio exists
-            if not seg_audio and seg.segment_audio_path and os.path.exists(seg.segment_audio_path):
-                seg_audio = seg.segment_audio_path
+                # Fallback to segment audio only if no conversation audio exists
+                if not seg_audio and seg.segment_audio_path and os.path.exists(seg.segment_audio_path):
+                    seg_audio = seg.segment_audio_path
 
-            if not seg_audio:
-                print(f"  ⚠️ Skipping segment {seg.id}: No audio file available")
-                continue
+                if not seg_audio:
+                    print(f"  ⚠️ Skipping segment {seg.id}: No audio file or stored embedding available")
+                    continue
 
-            batch_segments.append({
-                'audio_file': seg_audio,
-                'start_time': seg.start_offset,
-                'end_time': seg.end_offset
-            })
+                print(f"  ℹ️ Extracting embedding from audio for segment {seg.id} (not cached)")
+                batch_segments.append({
+                    'audio_file': seg_audio,
+                    'start_time': seg.start_offset,
+                    'end_time': seg.end_offset
+                })
 
-        # Extract all embeddings with MP3→WAV caching
+        # Extract embeddings for segments without stored embeddings
         if batch_segments:
             extracted_embeddings = engine.extract_segment_embeddings_batch(batch_segments)
-            embeddings = [emb for emb in extracted_embeddings if emb is not None and not np.isnan(emb).any()]
-        else:
-            embeddings = []
+            embeddings.extend([emb for emb in extracted_embeddings if emb is not None and not np.isnan(emb).any()])
 
         if embeddings:
             avg_embedding = np.mean(embeddings, axis=0)
@@ -396,29 +534,35 @@ async def identify_speaker_in_segment(
             if old_speaker_segments:
                 import numpy as np
 
-                # Prepare batch extraction input
-                old_batch_segments = []
+                # Collect embeddings (use stored if available, extract from audio otherwise)
+                old_embeddings = []
+                old_batch_segments = []  # Only for segments without stored embeddings
+
                 for seg in old_speaker_segments:
-                    conv = seg.conversation
+                    # Try to use stored embedding first (FAST - no audio extraction needed!)
+                    stored_embedding = seg.get_speaker_embedding()
+                    if stored_embedding is not None and not np.isnan(stored_embedding).any():
+                        old_embeddings.append(stored_embedding)
+                    else:
+                        # Need to extract from audio (SLOW - fallback only)
+                        conv = seg.conversation
 
-                    # CRITICAL: Prefer full conversation audio over segment audio (see above comment)
-                    seg_audio = conv.audio_path if conv.audio_path and os.path.exists(conv.audio_path) else None
-                    if not seg_audio and seg.segment_audio_path and os.path.exists(seg.segment_audio_path):
-                        seg_audio = seg.segment_audio_path
+                        # CRITICAL: Prefer full conversation audio over segment audio (see above comment)
+                        seg_audio = conv.audio_path if conv.audio_path and os.path.exists(conv.audio_path) else None
+                        if not seg_audio and seg.segment_audio_path and os.path.exists(seg.segment_audio_path):
+                            seg_audio = seg.segment_audio_path
 
-                    if seg_audio:
-                        old_batch_segments.append({
-                            'audio_file': seg_audio,
-                            'start_time': seg.start_offset,
-                            'end_time': seg.end_offset
-                        })
+                        if seg_audio:
+                            old_batch_segments.append({
+                                'audio_file': seg_audio,
+                                'start_time': seg.start_offset,
+                                'end_time': seg.end_offset
+                            })
 
-                # Extract all embeddings with MP3→WAV caching
+                # Extract embeddings for segments without stored embeddings
                 if old_batch_segments:
                     extracted_embeddings = engine.extract_segment_embeddings_batch(old_batch_segments)
-                    old_embeddings = [emb for emb in extracted_embeddings if emb is not None and not np.isnan(emb).any()]
-                else:
-                    old_embeddings = []
+                    old_embeddings.extend([emb for emb in extracted_embeddings if emb is not None and not np.isnan(emb).any()])
 
                 if old_embeddings:
                     old_avg_embedding = np.mean(old_embeddings, axis=0)
@@ -435,17 +579,25 @@ async def identify_speaker_in_segment(
         print(f"🎭 Recalculating emotion profiles for '{emotion_category}' (segment moved from {old_speaker_name} to {speaker.name})")
 
         # Extract emotion embedding from this segment
-        try:
-            emotion_data = engine.extract_emotion(
-                audio_file,
-                start_time,
-                end_time,
-                extract_embedding=True
-            )
-            segment_emotion_embedding = emotion_data.get('embedding') if emotion_data else None
-        except Exception as e:
-            print(f"⚠️ Could not extract emotion embedding for segment {segment_id}: {e}")
-            segment_emotion_embedding = None
+        # Try stored embedding first (FAST - no audio extraction needed!)
+        segment_emotion_embedding = segment.get_emotion_embedding()
+
+        if segment_emotion_embedding is None or np.isnan(segment_emotion_embedding).any():
+            # Extract from audio if not cached (SLOW - fallback only)
+            try:
+                print(f"  ℹ️ Extracting emotion embedding from audio for segment {segment_id} (not cached)")
+                emotion_data = engine.extract_emotion(
+                    audio_file,
+                    start_time,
+                    end_time,
+                    extract_embedding=True
+                )
+                segment_emotion_embedding = emotion_data.get('embedding') if emotion_data else None
+            except Exception as e:
+                print(f"⚠️ Could not extract emotion embedding for segment {segment_id}: {e}")
+                segment_emotion_embedding = None
+        else:
+            print(f"  ✓ Using cached emotion embedding for segment {segment_id}")
 
         # RECALCULATE NEW SPEAKER'S EMOTION PROFILE (add this segment's embedding)
         # Get all corrected, non-misidentified segments for NEW speaker's emotion
@@ -459,20 +611,26 @@ async def identify_speaker_in_segment(
         if new_speaker_emotion_segments:
             new_embeddings = []
             for seg in new_speaker_emotion_segments:
-                conv = seg.conversation
-                seg_audio = conv.audio_path if conv.audio_path and os.path.exists(conv.audio_path) else None
-                if not seg_audio and seg.segment_audio_path and os.path.exists(seg.segment_audio_path):
-                    seg_audio = seg.segment_audio_path
+                # Try stored embedding first (FAST - no audio extraction needed!)
+                stored_emb = seg.get_emotion_embedding()
+                if stored_emb is not None and not np.isnan(stored_emb).any():
+                    new_embeddings.append(stored_emb)
+                else:
+                    # Extract from audio if not cached (SLOW - fallback only)
+                    conv = seg.conversation
+                    seg_audio = conv.audio_path if conv.audio_path and os.path.exists(conv.audio_path) else None
+                    if not seg_audio and seg.segment_audio_path and os.path.exists(seg.segment_audio_path):
+                        seg_audio = seg.segment_audio_path
 
-                if seg_audio:
-                    try:
-                        emotion_data = engine.extract_emotion(seg_audio, seg.start_offset, seg.end_offset, extract_embedding=True)
-                        if emotion_data and 'embedding' in emotion_data:
-                            emb = emotion_data['embedding']
-                            if not np.isnan(emb).any():
-                                new_embeddings.append(emb)
-                    except Exception as e:
-                        print(f"  ⚠️ Could not extract emotion embedding for segment {seg.id}: {e}")
+                    if seg_audio:
+                        try:
+                            emotion_data = engine.extract_emotion(seg_audio, seg.start_offset, seg.end_offset, extract_embedding=True)
+                            if emotion_data and 'embedding' in emotion_data:
+                                emb = emotion_data['embedding']
+                                if not np.isnan(emb).any():
+                                    new_embeddings.append(emb)
+                        except Exception as e:
+                            print(f"  ⚠️ Could not extract emotion embedding for segment {seg.id}: {e}")
 
             if new_embeddings:
                 # Get or create emotion profile for NEW speaker
@@ -514,20 +672,26 @@ async def identify_speaker_in_segment(
                 old_emotion_embeddings = []
                 if old_speaker_emotion_segments:
                     for seg in old_speaker_emotion_segments:
-                        conv = seg.conversation
-                        seg_audio = conv.audio_path if conv.audio_path and os.path.exists(conv.audio_path) else None
-                        if not seg_audio and seg.segment_audio_path and os.path.exists(seg.segment_audio_path):
-                            seg_audio = seg.segment_audio_path
+                        # Try stored embedding first (FAST - no audio extraction needed!)
+                        stored_emb = seg.get_emotion_embedding()
+                        if stored_emb is not None and not np.isnan(stored_emb).any():
+                            old_emotion_embeddings.append(stored_emb)
+                        else:
+                            # Extract from audio if not cached (SLOW - fallback only)
+                            conv = seg.conversation
+                            seg_audio = conv.audio_path if conv.audio_path and os.path.exists(conv.audio_path) else None
+                            if not seg_audio and seg.segment_audio_path and os.path.exists(seg.segment_audio_path):
+                                seg_audio = seg.segment_audio_path
 
-                        if seg_audio:
-                            try:
-                                emotion_data = engine.extract_emotion(seg_audio, seg.start_offset, seg.end_offset, extract_embedding=True)
-                                if emotion_data and 'embedding' in emotion_data:
-                                    emb = emotion_data['embedding']
-                                    if not np.isnan(emb).any():
-                                        old_emotion_embeddings.append(emb)
-                            except Exception as e:
-                                print(f"  ⚠️ Could not extract emotion embedding for segment {seg.id}: {e}")
+                            if seg_audio:
+                                try:
+                                    emotion_data = engine.extract_emotion(seg_audio, seg.start_offset, seg.end_offset, extract_embedding=True)
+                                    if emotion_data and 'embedding' in emotion_data:
+                                        emb = emotion_data['embedding']
+                                        if not np.isnan(emb).any():
+                                            old_emotion_embeddings.append(emb)
+                                except Exception as e:
+                                    print(f"  ⚠️ Could not extract emotion embedding for segment {seg.id}: {e}")
 
                 # Get OLD speaker's emotion profile
                 old_emotion_profile = db.query(SpeakerEmotionProfile).filter(
@@ -575,6 +739,91 @@ async def identify_speaker_in_segment(
         else:
             merge_msg += f" (auto-deleted {len(deleted_unknowns)} orphaned Unknown speakers)"
 
+    db.commit()
+    db.refresh(segment)
+
+    # 🎭 RE-DETECT EMOTIONS for newly identified segments using personalized profiles
+    # This ensures Unknown→Known speaker transitions apply learned emotion profiles
+    print(f"🎭 Re-detecting emotions for {updated_count + 1} newly identified segment(s) using {speaker.name}'s emotion profiles...")
+    
+    # Get all segments we just identified (current segment + retroactively updated segments)
+    identified_segments = db.query(ConversationSegment).filter(
+        ConversationSegment.speaker_id == speaker.id,
+        ConversationSegment.conversation_id == conversation_id
+    ).all()
+    
+    # Check if speaker has emotion profiles
+    if speaker.emotion_profiles:
+        import numpy as np
+        from .config import get_config
+        
+        # Build profile list for matching
+        profiles = []
+        for prof in speaker.emotion_profiles:
+            profiles.append((
+                prof.emotion_category,
+                prof.get_embedding(),
+                prof.confidence_threshold
+            ))
+        
+        global_threshold = get_config().get_settings().emotion_threshold
+        emotions_updated = 0
+        
+        for seg in identified_segments:
+            if not seg.emotion_category:
+                continue  # Skip segments without emotion detection
+                
+            # Skip if already corrected (don't override manual corrections)
+            if seg.emotion_corrected:
+                continue
+                
+            original_emotion = seg.emotion_category
+            
+            # Get emotion embedding (use cached if available)
+            emotion_embedding = seg.get_emotion_embedding()
+            
+            if emotion_embedding is None or np.isnan(emotion_embedding).any():
+                # Extract from audio if not cached
+                conv = seg.conversation
+                seg_audio = conv.audio_path if conv.audio_path and os.path.exists(conv.audio_path) else None
+                
+                if seg_audio:
+                    try:
+                        emotion_data = engine.extract_emotion(
+                            seg_audio,
+                            seg.start_offset,
+                            seg.end_offset,
+                            extract_embedding=True
+                        )
+                        if emotion_data and 'embedding' in emotion_data:
+                            emotion_embedding = emotion_data.get('embedding')
+                    except Exception as e:
+                        print(f"  ⚠️ Could not extract emotion for segment {seg.id}: {e}")
+                        continue
+            
+            if emotion_embedding is not None and not np.isnan(emotion_embedding).any():
+                # Try to match against speaker's learned emotions
+                match = engine.match_emotion_to_profile(
+                    emotion_embedding,
+                    profiles,
+                    global_threshold,
+                    speaker_threshold=speaker.emotion_threshold
+                )
+                
+                if match:
+                    matched_emotion, confidence = match
+                    if matched_emotion != original_emotion:
+                        print(f"  ✓ Segment {seg.id}: {original_emotion} → {matched_emotion} ({confidence:.2%} personalized match)")
+                        seg.emotion_category = matched_emotion
+                        seg.emotion_confidence = confidence
+                        emotions_updated += 1
+        
+        if emotions_updated > 0:
+            print(f"✅ Updated {emotions_updated} emotion(s) using personalized profiles")
+    else:
+        print(f"  ℹ️ No emotion profiles found for {speaker.name} - keeping generic detections")
+    
+    # Commit all changes
     db.commit()
     db.refresh(segment)
 
@@ -632,27 +881,33 @@ async def toggle_segment_misidentified(
             ).all()
 
             if speaker_segments:
-                # Prepare batch extraction input
-                batch_segments = []
+                # Collect embeddings (use stored if available, extract from audio otherwise)
+                embeddings = []
+                batch_segments = []  # Only for segments without stored embeddings
+
                 for seg in speaker_segments:
-                    conv = seg.conversation
-                    seg_audio = seg.segment_audio_path if seg.segment_audio_path and os.path.exists(seg.segment_audio_path) else conv.audio_path
+                    # Try stored embedding first (FAST - no audio extraction needed!)
+                    stored_embedding = seg.get_speaker_embedding()
+                    if stored_embedding is not None and not np.isnan(stored_embedding).any():
+                        embeddings.append(stored_embedding)
+                    else:
+                        # Extract from audio if not cached (SLOW - fallback only)
+                        conv = seg.conversation
+                        seg_audio = seg.segment_audio_path if seg.segment_audio_path and os.path.exists(seg.segment_audio_path) else conv.audio_path
 
-                    if not seg_audio or not os.path.exists(seg_audio):
-                        continue
+                        if not seg_audio or not os.path.exists(seg_audio):
+                            continue
 
-                    batch_segments.append({
-                        'audio_file': seg_audio,
-                        'start_time': seg.start_offset,
-                        'end_time': seg.end_offset
-                    })
+                        batch_segments.append({
+                            'audio_file': seg_audio,
+                            'start_time': seg.start_offset,
+                            'end_time': seg.end_offset
+                        })
 
-                # Extract all embeddings with MP3→WAV caching
+                # Extract embeddings for segments without stored embeddings
                 if batch_segments:
                     extracted_embeddings = engine.extract_segment_embeddings_batch(batch_segments)
-                    embeddings = [emb for emb in extracted_embeddings if emb is not None and not np.isnan(emb).any()]
-                else:
-                    embeddings = []
+                    embeddings.extend([emb for emb in extracted_embeddings if emb is not None and not np.isnan(emb).any()])
 
                 if embeddings:
                     avg_embedding = np.mean(embeddings, axis=0)
@@ -734,28 +989,34 @@ async def toggle_emotion_misidentified(
             embeddings = []
             if corrected_segments:
                 for seg in corrected_segments:
-                    conv = seg.conversation
-                    seg_audio = seg.segment_audio_path if seg.segment_audio_path and os.path.exists(seg.segment_audio_path) else conv.audio_path
+                    # Try stored embedding first (FAST - no audio extraction needed!)
+                    stored_emb = seg.get_emotion_embedding()
+                    if stored_emb is not None and not np.isnan(stored_emb).any():
+                        embeddings.append(stored_emb)
+                    else:
+                        # Extract from audio if not cached (SLOW - fallback only)
+                        conv = seg.conversation
+                        seg_audio = seg.segment_audio_path if seg.segment_audio_path and os.path.exists(seg.segment_audio_path) else conv.audio_path
 
-                    if not seg_audio or not os.path.exists(seg_audio):
-                        continue
+                        if not seg_audio or not os.path.exists(seg_audio):
+                            continue
 
-                    try:
-                        # Extract emotion embedding
-                        emotion_data = engine.extract_emotion(
-                            seg_audio,
-                            seg.start_offset,
-                            seg.end_offset,
-                            extract_embedding=True
-                        )
+                        try:
+                            # Extract emotion embedding
+                            emotion_data = engine.extract_emotion(
+                                seg_audio,
+                                seg.start_offset,
+                                seg.end_offset,
+                                extract_embedding=True
+                            )
 
-                        if emotion_data and 'embedding' in emotion_data:
-                            emb = emotion_data['embedding']
-                            if not np.isnan(emb).any():
-                                embeddings.append(emb)
-                    except Exception as e:
-                        print(f"Warning: Could not extract emotion embedding for segment {seg.id}: {e}")
-                        continue
+                            if emotion_data and 'embedding' in emotion_data:
+                                emb = emotion_data['embedding']
+                                if not np.isnan(emb).any():
+                                    embeddings.append(emb)
+                        except Exception as e:
+                            print(f"Warning: Could not extract emotion embedding for segment {seg.id}: {e}")
+                            continue
 
             # Update or delete emotion profile based on valid embeddings
             if embeddings:
@@ -804,48 +1065,6 @@ async def toggle_emotion_misidentified(
         "message": f"Emotion correction for segment {segment_id} {status_text}",
         "emotion_misidentified": segment.emotion_misidentified,
         "emotion_profile_recalculated": segment.speaker_id is not None and segment.emotion_category is not None
-    }
-
-
-@router.post("/batch-convert-mp3")
-async def batch_convert_conversations_to_mp3(
-    delete_originals: bool = True,
-    db: Session = Depends(get_db)
-):
-    """Batch convert all WAV conversations to MP3"""
-    conversations = db.query(Conversation).filter(
-        Conversation.audio_format == "wav",
-        Conversation.audio_path.isnot(None)
-    ).all()
-
-    converted = []
-    errors = []
-
-    for conv in conversations:
-        if not os.path.exists(conv.audio_path):
-            errors.append(f"File not found: {conv.audio_path}")
-            continue
-
-        try:
-            mp3_path = convert_to_mp3(
-                conv.audio_path,
-                bitrate="192k",
-                delete_original=delete_originals
-            )
-
-            conv.audio_path = mp3_path
-            conv.audio_format = "mp3"
-            converted.append(conv.id)
-
-        except Exception as e:
-            errors.append(f"Conv {conv.id}: {str(e)}")
-
-    db.commit()
-
-    return {
-        "converted": len(converted),
-        "conversation_ids": converted,
-        "errors": errors
     }
 
 
@@ -1025,27 +1244,37 @@ async def correct_emotion_in_segment(
     # Extract emotion embedding if learning
     emotion_embedding = None
     if learn:
-        try:
-            emotion_data = engine.extract_emotion(
-                audio_file,
-                segment.start_offset,
-                segment.end_offset,
-                extract_embedding=True
-            )
+        import numpy as np
 
-            if emotion_data:
-                emotion_embedding = emotion_data.get('embedding')
+        # Try stored embedding first (FAST - no audio extraction needed!)
+        emotion_embedding = segment.get_emotion_embedding()
 
-            if emotion_embedding is None:
+        if emotion_embedding is None or np.isnan(emotion_embedding).any():
+            # Extract from audio if not cached (SLOW - fallback only)
+            try:
+                print(f"  ℹ️ Extracting emotion embedding from audio for segment {segment_id} (not cached)")
+                emotion_data = engine.extract_emotion(
+                    audio_file,
+                    segment.start_offset,
+                    segment.end_offset,
+                    extract_embedding=True
+                )
+
+                if emotion_data:
+                    emotion_embedding = emotion_data.get('embedding')
+
+                if emotion_embedding is None:
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to extract emotion embedding for learning"
+                    )
+            except Exception as e:
                 raise HTTPException(
                     status_code=500,
-                    detail="Failed to extract emotion embedding for learning"
+                    detail=f"Failed to extract emotion embedding: {str(e)}"
                 )
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to extract emotion embedding: {str(e)}"
-            )
+        else:
+            print(f"  ✓ Using cached emotion embedding for segment {segment_id}")
 
     # CRITICAL: If changing from one emotion to another, recalculate OLD emotion profile
     # to exclude this segment (like speaker identification does)
@@ -1067,25 +1296,31 @@ async def correct_emotion_in_segment(
         old_embeddings = []
         if old_emotion_segments:
             for seg in old_emotion_segments:
-                conv = seg.conversation
-                seg_audio = conv.audio_path if conv.audio_path and os.path.exists(conv.audio_path) else None
-                if not seg_audio and seg.segment_audio_path and os.path.exists(seg.segment_audio_path):
-                    seg_audio = seg.segment_audio_path
+                # Try stored embedding first (FAST - no audio extraction needed!)
+                stored_emb = seg.get_emotion_embedding()
+                if stored_emb is not None and not np.isnan(stored_emb).any():
+                    old_embeddings.append(stored_emb)
+                else:
+                    # Extract from audio if not cached (SLOW - fallback only)
+                    conv = seg.conversation
+                    seg_audio = conv.audio_path if conv.audio_path and os.path.exists(conv.audio_path) else None
+                    if not seg_audio and seg.segment_audio_path and os.path.exists(seg.segment_audio_path):
+                        seg_audio = seg.segment_audio_path
 
-                if seg_audio:
-                    try:
-                        emotion_data = engine.extract_emotion(
-                            seg_audio,
-                            seg.start_offset,
-                            seg.end_offset,
-                            extract_embedding=True
-                        )
-                        if emotion_data and 'embedding' in emotion_data:
-                            emb = emotion_data['embedding']
-                            if not np.isnan(emb).any():
-                                old_embeddings.append(emb)
-                    except Exception as e:
-                        print(f"Warning: Could not extract emotion embedding for segment {seg.id}: {e}")
+                    if seg_audio:
+                        try:
+                            emotion_data = engine.extract_emotion(
+                                seg_audio,
+                                seg.start_offset,
+                                seg.end_offset,
+                                extract_embedding=True
+                            )
+                            if emotion_data and 'embedding' in emotion_data:
+                                emb = emotion_data['embedding']
+                                if not np.isnan(emb).any():
+                                    old_embeddings.append(emb)
+                        except Exception as e:
+                            print(f"Warning: Could not extract emotion embedding for segment {seg.id}: {e}")
 
         # Update or delete OLD emotion profile based on remaining embeddings
         old_profile = db.query(SpeakerEmotionProfile).filter(
@@ -1094,11 +1329,28 @@ async def correct_emotion_in_segment(
         ).first()
 
         if old_embeddings and old_profile:
-            # Recalculate profile with remaining segments
+            # Recalculate EMOTION profile with remaining segments
             avg_emb = np.mean(old_embeddings, axis=0)
             old_profile.set_embedding(avg_emb)
             old_profile.sample_count = len(old_embeddings)
-            print(f"✓ Recalculated emotion profile '{old_emotion}' (removed segment {segment_id}, now {len(old_embeddings)} samples)")
+            
+            # ALSO recalculate VOICE profile for old emotion (NEW - dual-detector)
+            old_voice_embeddings = []
+            for seg in old_emotion_segments:
+                voice_emb = seg.get_speaker_embedding()
+                if voice_emb is not None and not np.isnan(voice_emb).any():
+                    old_voice_embeddings.append(voice_emb)
+            
+            if old_voice_embeddings:
+                avg_voice = np.mean(old_voice_embeddings, axis=0)
+                old_profile.set_voice_embedding(avg_voice)
+                old_profile.voice_sample_count = len(old_voice_embeddings)
+                print(f"✓ Recalculated '{old_emotion}' profile (removed segment {segment_id}, now {len(old_embeddings)} emotion samples, {len(old_voice_embeddings)} voice samples)")
+            else:
+                # No voice samples left for old emotion
+                old_profile.set_voice_embedding(None)
+                old_profile.voice_sample_count = 0
+                print(f"✓ Recalculated '{old_emotion}' emotion profile (removed segment {segment_id}, now {len(old_embeddings)} samples, no voice samples)")
         elif old_profile:
             # No segments left - delete the profile
             db.delete(old_profile)
@@ -1106,12 +1358,14 @@ async def correct_emotion_in_segment(
 
     # Update segment
     segment.emotion_category = corrected_emotion
+    segment.emotion_confidence = 1.0  # Manual correction = 100% confidence
     segment.emotion_corrected = True
     segment.emotion_corrected_at = datetime.utcnow()
 
     # Learn from correction if requested
     merge_msg = ""
     sample_count = 0
+    voice_samples = 0
     if learn and emotion_embedding is not None:
         import numpy as np
 
@@ -1122,7 +1376,7 @@ async def correct_emotion_in_segment(
         ).first()
 
         if profile:
-            # MERGE embeddings (weighted average like speaker voice embeddings)
+            # MERGE EMOTION embeddings (weighted average)
             existing_emb = profile.get_embedding()
 
             # Weighted average: existing embedding has more weight based on sample count
@@ -1134,19 +1388,57 @@ async def correct_emotion_in_segment(
             profile.updated_at = datetime.utcnow()
 
             sample_count = profile.sample_count
-            merge_msg = f" (merged with existing profile, {sample_count} samples)"
+            print(f"✓ Merged segment {segment_id} into '{corrected_emotion}' profile (now {sample_count} emotion samples)")
         else:
             # Create new profile
             profile = SpeakerEmotionProfile(
                 speaker_id=segment.speaker_id,
                 emotion_category=corrected_emotion,
-                sample_count=1
+                sample_count=1,
+                voice_sample_count=0
             )
             profile.set_embedding(emotion_embedding)
             db.add(profile)
 
             sample_count = 1
-            merge_msg = " (new emotion profile created)"
+            print(f"✓ Created new '{corrected_emotion}' profile with segment {segment_id}")
+        
+        # NEW: Also merge VOICE embedding for this emotion (Detector 2 data)
+        voice_emb = segment.get_speaker_embedding()
+        if voice_emb is not None and not np.isnan(voice_emb).any():
+            existing_voice_emb = profile.get_voice_embedding()
+
+            if existing_voice_emb is not None and not np.isnan(existing_voice_emb).any():
+                # Merge with existing voice profile for this emotion
+                voice_weight = profile.voice_sample_count / (profile.voice_sample_count + 1)
+                merged_voice = (existing_voice_emb * voice_weight) + (voice_emb * (1 - voice_weight))
+                profile.set_voice_embedding(merged_voice)
+                profile.voice_sample_count += 1
+                print(f"  → Also merged voice embedding (now {profile.voice_sample_count} voice samples)")
+            else:
+                # First voice sample for this emotion
+                profile.set_voice_embedding(voice_emb)
+                profile.voice_sample_count = 1
+                print(f"  → Added first voice sample for '{corrected_emotion}' profile")
+
+            voice_samples = profile.voice_sample_count
+            
+            # Also update generic speaker profile (keeps it current)
+            speaker = db.query(Speaker).filter(Speaker.id == segment.speaker_id).first()
+            if speaker:
+                existing_speaker_emb = speaker.get_embedding()
+                # Get all non-misidentified segments for this speaker
+                all_segments = db.query(ConversationSegment).filter(
+                    ConversationSegment.speaker_id == speaker.id,
+                    ConversationSegment.is_misidentified == False
+                ).count()
+                
+                if all_segments > 0:
+                    speaker_weight = (all_segments - 1) / all_segments
+                    merged_speaker = (existing_speaker_emb * speaker_weight) + (voice_emb * (1 - speaker_weight))
+                    speaker.set_embedding(merged_speaker)
+        
+        merge_msg = f" (emotion: {sample_count} samples, voice: {voice_samples} samples)"
 
     db.commit()
     db.refresh(segment)
@@ -1156,8 +1448,12 @@ async def correct_emotion_in_segment(
 
     speaker = db.query(Speaker).filter(Speaker.id == segment.speaker_id).first()
 
+    # Determine if this was a correction or confirmation
+    is_confirmation = old_emotion == corrected_emotion
+    action_msg = "confirmed" if is_confirmation else f"corrected from '{old_emotion}' to '{corrected_emotion}'"
+    
     return {
-        "message": f"Emotion corrected from '{old_emotion}' to '{corrected_emotion}'{merge_msg}",
+        "message": f"Emotion {action_msg}{merge_msg}",
         "old_emotion": old_emotion,
         "new_emotion": corrected_emotion,
         "learned": learn,
@@ -1234,14 +1530,15 @@ async def get_speaker_emotion_threshold(
 @router.patch("/speakers/{speaker_id}/emotion-threshold")
 async def set_speaker_emotion_threshold(
     speaker_id: int,
-    threshold: Optional[float] = Query(None, ge=0.3, le=0.9, description="Custom threshold (0.3-0.9) or null for global"),
+    threshold: Optional[float] = Query(None, ge=0.3, le=1.0, description="Custom threshold (0.3-1.0) or null for global"),
     db: Session = Depends(get_db)
 ):
     """
     Set speaker's custom emotion threshold.
 
     Args:
-        threshold: Custom threshold (0.3-0.9) or None to use global default
+        threshold: Custom threshold (0.3-1.0) or None to use global default
+                  Higher = stricter matching (1.0 = perfect match required)
 
     Returns:
         Updated threshold settings
@@ -1287,7 +1584,9 @@ async def get_speaker_emotion_profiles(
             {
                 "emotion_category": prof.emotion_category,
                 "sample_count": prof.sample_count,
+                "voice_sample_count": prof.voice_sample_count,
                 "confidence_threshold": prof.confidence_threshold,
+                "voice_threshold": prof.voice_threshold,
                 "created_at": prof.created_at,
                 "updated_at": prof.updated_at
             }
@@ -1296,3 +1595,50 @@ async def get_speaker_emotion_profiles(
     }
 
 
+
+
+@router.patch("/speakers/{speaker_id}/emotion-profiles/{emotion_category}/threshold")
+async def set_emotion_profile_threshold(
+    speaker_id: int,
+    emotion_category: str,
+    threshold: Optional[float] = Query(None, ge=0.3, le=1.0, description="Custom threshold (0.3-1.0) or null to use speaker/global"),
+    db: Session = Depends(get_db)
+):
+    """
+    Set per-emotion threshold for a speaker's emotion profile.
+    
+    This allows fine-grained control - e.g., set "surprised" to 0.75 but "angry" to 0.99.
+    
+    Args:
+        emotion_category: The emotion to set threshold for (angry, happy, sad, etc.)
+        threshold: Custom threshold (0.3-1.0) or None to use speaker/global default
+    
+    Returns:
+        Updated profile information
+    """
+    speaker = db.query(Speaker).filter(Speaker.id == speaker_id).first()
+    if not speaker:
+        raise HTTPException(status_code=404, detail="Speaker not found")
+    
+    # Get or create the emotion profile
+    profile = db.query(SpeakerEmotionProfile).filter(
+        SpeakerEmotionProfile.speaker_id == speaker_id,
+        SpeakerEmotionProfile.emotion_category == emotion_category
+    ).first()
+    
+    if not profile:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Emotion profile '{ emotion_category}' not found for speaker '{speaker.name}'. Create it by correcting an emotion first."
+        )
+    
+    # Update the threshold
+    profile.confidence_threshold = threshold
+    db.commit()
+    
+    return {
+        "message": f"Updated {emotion_category} threshold for '{speaker.name}'",
+        "speaker_name": speaker.name,
+        "emotion_category": emotion_category,
+        "threshold": threshold
+    }
