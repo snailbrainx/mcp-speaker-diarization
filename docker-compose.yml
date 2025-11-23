@@ -2,7 +2,6 @@ services:
   speaker-diarization:
     build: .
     container_name: speaker-diarization-app
-    runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - DATABASE_URL=sqlite:////app/volumes/speakers.db
@@ -13,6 +12,7 @@ services:
       - FILTER_HALLUCINATIONS=${FILTER_HALLUCINATIONS:-true}
       - WHISPER_MODEL=${WHISPER_MODEL:-large-v3}
       - WHISPER_LANGUAGE=${WHISPER_LANGUAGE:-en}
+      - OFFLINE_MODE=${OFFLINE_MODE:-false}
     ports:
       - "8000:8000"  # FastAPI backend API
     volumes:

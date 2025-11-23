@@ -135,6 +135,11 @@ async def websocket_endpoint(
         recorder.start_recording(conversation_id)
         active_recorders[conversation_id] = recorder
 
+        # Load speaker cache for fast matching (avoids DB queries per segment)
+        engine = get_engine()
+        cache_size = engine.load_speaker_cache(db)
+        print(f"🚀 Speaker cache loaded: {cache_size} profiles ready for streaming")
+
         # Send confirmation
         await send_message(websocket, "started", {
             "conversation_id": conversation_id,
@@ -289,6 +294,14 @@ async def _handle_segment_processed(
                     speaker_id, speaker_name = auto_enroll_unknown_speaker(
                         embedding, db, threshold=threshold
                     )
+                    # Add newly enrolled speaker to cache (avoids cache invalidation)
+                    if speaker_id:
+                        engine.add_speaker_to_cache(
+                            speaker_id=speaker_id,
+                            speaker_name=speaker_name,
+                            embedding=embedding,
+                            profile_type='general'
+                        )
                     # Update confidence since we're using the enrolled speaker
                     confidence = 1.0 if speaker_id else confidence
 
@@ -360,8 +373,8 @@ async def _handle_segment_processed(
             print(f"   → Segment: {seg_data['speaker_name']}: {seg_data['text'][:50]}...")
             await send_message(websocket, "segment", seg_data)
 
-        # Clear GPU cache
-        engine.clear_gpu_cache()
+        # Queue async GPU cleanup (non-blocking)
+        engine.clear_gpu_cache_async("segment_complete")
 
     except Exception as e:
         print(f"Error processing segment: {e}")
@@ -424,6 +437,12 @@ async def _finalize_recording(
             })
 
         print(f"Recording finalized: {conversation.num_segments} segments, {conversation.num_speakers} speakers")
+
+        # Force GPU cleanup after recording stops (free up VRAM)
+        engine = get_engine()
+        print(f"🧹 Forcing GPU cleanup after recording stop...")
+        engine.clear_gpu_cache()  # Blocking cleanup to free VRAM immediately
+        print(f"✅ GPU cleanup complete")
 
     except Exception as e:
         print(f"Error finalizing recording: {e}")

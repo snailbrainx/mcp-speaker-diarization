@@ -8,6 +8,9 @@ from faster_whisper import WhisperModel
 from concurrent.futures import ThreadPoolExecutor
 import time
 from pydub import AudioSegment
+import threading
+import queue
+import gc
 
 
 def auto_enroll_unknown_speaker(embedding: np.ndarray, db_session, threshold: float = 0.30):
@@ -119,13 +122,174 @@ class SpeakerRecognitionEngine:
         self._whisper_model = None
         self._emotion_model = None
 
+        # Speaker profile cache (reduces DB queries during streaming)
+        self._speaker_cache = None
+        self._cache_lock = threading.Lock()
+
+        # Background cleanup thread (non-blocking)
+        self._cleanup_running = True  # Set BEFORE starting thread
+        self._cleanup_queue = queue.Queue(maxsize=10)  # Limit queue size
+        self._cleanup_thread = threading.Thread(target=self._cleanup_worker, daemon=True)
+        self._cleanup_thread.start()
+
+        # Periodic cleanup timer (every 2 minutes)
+        self._periodic_cleanup_thread = threading.Thread(target=self._periodic_cleanup_worker, daemon=True)
+        self._periodic_cleanup_thread.start()
+
         print(f"Speaker Recognition Engine initialized on device: {self.device}")
+        print(f"Background GPU cleanup thread started")
+        print(f"Periodic cleanup timer started (every 30 seconds)")
+
+    def _cleanup_worker(self):
+        """Background worker that processes GPU cleanup requests"""
+        while self._cleanup_running:
+            try:
+                # Wait for cleanup request (blocks until available)
+                cleanup_type = self._cleanup_queue.get(timeout=1.0)
+
+                if cleanup_type and torch.cuda.is_available():
+                    # Perform cleanup
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    if hasattr(torch.cuda, 'reset_peak_memory_stats'):
+                        torch.cuda.reset_peak_memory_stats()
+
+                self._cleanup_queue.task_done()
+
+            except queue.Empty:
+                continue  # No cleanup requests, keep waiting
+            except Exception as e:
+                print(f"Background cleanup error: {e}")
+
+    def _periodic_cleanup_worker(self):
+        """Periodic cleanup timer - runs every 30 seconds to free VRAM"""
+        import time
+        while self._cleanup_running:
+            try:
+                # Wait 30 seconds (more frequent than 2 minutes)
+                time.sleep(30)
+
+                if torch.cuda.is_available():
+                    vram_used_gb = torch.cuda.memory_reserved() / (1024**3)
+
+                    # ALWAYS cleanup every 30 seconds (unconditional for stability with other models)
+                    print(f"⏰ Periodic cleanup (VRAM: {vram_used_gb:.1f}GB)")
+
+                    # Force cleanup
+                    gc.collect()
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+
+                    vram_after_gb = torch.cuda.memory_reserved() / (1024**3)
+                    freed_gb = vram_used_gb - vram_after_gb
+                    if freed_gb > 0.1:
+                        print(f"  ✅ Freed {freed_gb:.1f}GB VRAM (now {vram_after_gb:.1f}GB)")
+
+            except Exception as e:
+                print(f"Periodic cleanup error: {e}")
+
+    def clear_gpu_cache_async(self, cleanup_type="standard"):
+        """Queue GPU cleanup to run in background (non-blocking, conditional on VRAM usage)"""
+        if not torch.cuda.is_available():
+            return
+
+        # Get VRAM threshold from env (default: 12GB)
+        threshold_gb = float(os.getenv("CLEANUP_VRAM_THRESHOLD_GB", "12"))
+
+        # Check current VRAM usage (reserved = what nvidia-smi shows)
+        vram_used_gb = torch.cuda.memory_reserved() / (1024**3)
+
+        # Only cleanup if VRAM exceeds threshold
+        if vram_used_gb < threshold_gb:
+            return  # Skip cleanup - VRAM usage is fine
+
+        try:
+            # Non-blocking put - if queue is full, just skip (cleanup will happen eventually)
+            self._cleanup_queue.put_nowait(cleanup_type)
+        except queue.Full:
+            pass  # Queue full, cleanup will happen from pending requests
 
     def clear_gpu_cache(self):
-        """Clear GPU memory cache to prevent memory accumulation"""
+        """Clear GPU memory cache immediately (blocking - use sparingly)"""
         if torch.cuda.is_available():
+            # Force garbage collection first
+            gc.collect()
+
+            # Clear PyTorch CUDA cache
             torch.cuda.empty_cache()
+
+            # Synchronize to ensure all operations are complete
             torch.cuda.synchronize()
+
+            # Additional cleanup: clear any lingering computation graphs
+            if hasattr(torch.cuda, 'reset_peak_memory_stats'):
+                torch.cuda.reset_peak_memory_stats()
+
+    def load_speaker_cache(self, db_session):
+        """
+        Load all speaker profiles into memory cache (one-time DB query).
+        Dramatically reduces DB overhead during streaming (153 queries → 1 query).
+        """
+        import numpy as np
+        from .models import Speaker, SpeakerEmotionProfile
+
+        with self._cache_lock:
+            all_profiles = []
+            speakers = db_session.query(Speaker).all()
+
+            print(f"📦 Loading speaker cache: {len(speakers)} speakers...")
+
+            for speaker in speakers:
+                # 1. Add general speaker profile
+                general_emb = speaker.get_embedding()
+                if general_emb is not None and not np.isnan(general_emb).any():
+                    all_profiles.append({
+                        'speaker_id': speaker.id,
+                        'speaker_name': speaker.name,
+                        'embedding': general_emb,
+                        'emotion': None,
+                        'profile_type': 'general'
+                    })
+
+                # 2. Add ALL emotion voice profiles for this speaker
+                for emotion_profile in speaker.emotion_profiles:
+                    voice_emb = emotion_profile.get_voice_embedding()
+                    if voice_emb is not None and not np.isnan(voice_emb).any():
+                        # Only include if has enough samples (min 3)
+                        if emotion_profile.voice_sample_count >= 3:
+                            all_profiles.append({
+                                'speaker_id': speaker.id,
+                                'speaker_name': speaker.name,
+                                'embedding': voice_emb,
+                                'emotion': emotion_profile.emotion_category,
+                                'profile_type': 'emotion_voice'
+                            })
+
+            self._speaker_cache = all_profiles
+            print(f"✅ Speaker cache loaded: {len(all_profiles)} total profiles")
+            return len(all_profiles)
+
+    def add_speaker_to_cache(self, speaker_id, speaker_name, embedding, emotion=None, profile_type='general'):
+        """Add newly enrolled speaker to cache (avoids cache invalidation)"""
+        if self._speaker_cache is None:
+            return  # Cache not initialized
+
+        with self._cache_lock:
+            self._speaker_cache.append({
+                'speaker_id': speaker_id,
+                'speaker_name': speaker_name,
+                'embedding': embedding,
+                'emotion': emotion,
+                'profile_type': profile_type
+            })
+            print(f"➕ Added to speaker cache: {speaker_name} ({profile_type})")
+
+    def clear_speaker_cache(self):
+        """Clear speaker cache (forces reload on next use)"""
+        with self._cache_lock:
+            self._speaker_cache = None
+            print(f"🗑️ Speaker cache cleared")
 
     @property
     def diarization_pipeline(self):
@@ -248,6 +412,11 @@ class SpeakerRecognitionEngine:
                 "avg_logprob": segment.avg_logprob  # Segment-level confidence indicator
             })
 
+        # Explicit cleanup: delete generator and info objects
+        del segments_generator, info
+        # Queue async cleanup (non-blocking)
+        self.clear_gpu_cache_async("transcription")
+
         return transcription_segments
 
     def extract_embedding(self, audio_file: str) -> np.ndarray:
@@ -289,10 +458,17 @@ class SpeakerRecognitionEngine:
                 "duration": turn.end - turn.start
             })
 
-        return {
+        result = {
             "segments": segments,
             "num_speakers": len(set(s["speaker"] for s in segments))
         }
+
+        # Explicit cleanup: delete output object and clear references
+        del output
+        # Queue async cleanup (non-blocking)
+        self.clear_gpu_cache_async("diarization")
+
+        return result
 
     def match_speaker(
         self,
@@ -672,14 +848,24 @@ class SpeakerRecognitionEngine:
                         embedding = np.array(feats, dtype=np.float32)
                         emotion_data['embedding'] = embedding
 
+                # Explicit cleanup: delete result object and clear references
+                del result, res
+                # Queue async cleanup (non-blocking)
+                self.clear_gpu_cache_async("emotion")
+
                 return emotion_data
 
+            # Cleanup even if no result
+            del result
+            self.clear_gpu_cache_async("emotion")
             return None
 
         except Exception as e:
             print(f"Warning: Failed to extract emotion: {e}")
             import traceback
             traceback.print_exc()
+            # Cleanup on error
+            self.clear_gpu_cache_async("emotion_error")
             return None
 
     def process_audio_with_recognition(
@@ -772,7 +958,7 @@ class SpeakerRecognitionEngine:
         for speaker_id, speaker_name, _ in known_speakers:
             print(f"  - ID: {speaker_id}, Name: {speaker_name}")
 
-        # Run transcription and diarization IN PARALLEL for speed
+        # Run transcription and diarization IN PARALLEL
         print("Running transcription and diarization in parallel...")
         start_time = time.time()
 
@@ -787,6 +973,13 @@ class SpeakerRecognitionEngine:
 
         elapsed = time.time() - start_time
         print(f"Parallel processing completed in {elapsed:.2f}s")
+
+        # Explicit cleanup after parallel processing to free VRAM before emotion extraction
+        del transcription_future, diarization_future
+        gc.collect()
+        # Queue async cleanup (non-blocking) - this was blocking processing before
+        self.clear_gpu_cache_async("parallel")
+        print(f"🧹 GPU cache cleanup queued (async)")
 
         # Step 3: Match transcription segments to speakers
         # Map diarization labels (SPEAKER_00, SPEAKER_01) to Unknown_XX
@@ -1011,6 +1204,45 @@ class SpeakerRecognitionEngine:
                     "detector_breakdown": emotion_data.get("detector_breakdown")  # NEW: Dual-detector results
                 })
 
+            # Hallucination filtering (if enabled)
+            from .config import get_config
+            config = get_config()
+            settings = config.get_settings()
+
+            if settings.filter_hallucinations:
+                text = trans_seg["text"].strip().lower()
+                duration = trans_seg["end"] - trans_seg["start"]
+                avg_logprob = trans_seg.get("avg_logprob", 0)
+
+                # Filter 1: Minimum text length (3 characters)
+                if len(text) < 3:
+                    print(f"⏭️ Skipping hallucination (text too short): '{trans_seg['text']}'")
+                    continue
+
+                # Filter 2: Single character or filler sounds
+                if len(text) == 1 or text in ["...", "ah", "um", "uh", "oh", "eh", "hmm", "mm"]:
+                    print(f"⏭️ Skipping hallucination (filler): '{trans_seg['text']}'")
+                    continue
+
+                # Filter 3: Low confidence hallucinations (Whisper hallucinating on silence/music)
+                # avg_logprob < -1.0 = very low confidence, likely hallucination
+                hallucination_patterns = [
+                    "thank you",
+                    "thanks for watching",
+                    "please subscribe",
+                    "like and subscribe",
+                    "don't forget to subscribe",
+                    "see you next time",
+                    "thanks for listening",
+                ]
+
+                # Check if text matches hallucination patterns
+                if any(pattern in text for pattern in hallucination_patterns):
+                    # Filter if either: very short (<0.4s) OR low confidence (<-0.6)
+                    if duration < 0.4 or (avg_logprob is not None and avg_logprob < -0.6):
+                        print(f"⏭️ Skipping hallucination (dur={duration:.2f}s, conf={avg_logprob:.2f}): '{trans_seg['text']}'")
+                        continue
+
             transcribed_with_speakers.append(segment_data)
 
         return {
@@ -1038,53 +1270,53 @@ class SpeakerRecognitionEngine:
         best_match = None
         best_similarity = threshold
 
-        # Get all speakers
-        speakers = db_session.query(Speaker).all()
+        # Use cached profiles if available (fast), otherwise load from DB (slow)
+        with self._cache_lock:
+            if self._speaker_cache is not None:
+                all_profiles = self._speaker_cache
+                print(f"  ⚡ Using cached profiles: {len(all_profiles)} profiles")
+            else:
+                # Cache not loaded - fall back to DB query (will be slow)
+                print(f"  ⚠️ Cache not loaded, querying DB...")
+                speakers = db_session.query(Speaker).all()
 
-        all_profiles = []  # List of (speaker_id, speaker_name, embedding, emotion_or_none)
+                all_profiles = []
 
-        for speaker in speakers:
-            # 1. Add general speaker profile
-            general_emb = speaker.get_embedding()
-            if general_emb is not None and not np.isnan(general_emb).any():
-                all_profiles.append({
-                    'speaker_id': speaker.id,
-                    'speaker_name': speaker.name,
-                    'embedding': general_emb,
-                    'emotion': None,  # General profile
-                    'profile_type': 'general'
-                })
+                for speaker in speakers:
+                    # 1. Add general speaker profile
+                    general_emb = speaker.get_embedding()
+                    if general_emb is not None and not np.isnan(general_emb).any():
+                        all_profiles.append({
+                            'speaker_id': speaker.id,
+                            'speaker_name': speaker.name,
+                            'embedding': general_emb,
+                            'emotion': None,
+                            'profile_type': 'general'
+                        })
 
-            # 2. Add ALL emotion voice profiles for this speaker
-            for emotion_profile in speaker.emotion_profiles:
-                voice_emb = emotion_profile.get_voice_embedding()
-                # Only include if we have enough samples (3+)
-                if (voice_emb is not None and
-                    not np.isnan(voice_emb).any() and
-                    emotion_profile.voice_sample_count >= 3):
-                    all_profiles.append({
-                        'speaker_id': speaker.id,
-                        'speaker_name': speaker.name,
-                        'embedding': voice_emb,
-                        'emotion': emotion_profile.emotion_category,
-                        'profile_type': 'emotion_voice',
-                        'sample_count': emotion_profile.voice_sample_count
-                    })
+                    # 2. Add ALL emotion voice profiles for this speaker
+                    for emotion_profile in speaker.emotion_profiles:
+                        voice_emb = emotion_profile.get_voice_embedding()
+                        if (voice_emb is not None and
+                            not np.isnan(voice_emb).any() and
+                            emotion_profile.voice_sample_count >= 3):
+                            all_profiles.append({
+                                'speaker_id': speaker.id,
+                                'speaker_name': speaker.name,
+                                'embedding': voice_emb,
+                                'emotion': emotion_profile.emotion_category,
+                                'profile_type': 'emotion_voice',
+                                'sample_count': emotion_profile.voice_sample_count
+                            })
 
-        print(f"  🔍 Checking against {len(all_profiles)} voice profiles (general + emotion-specific)")
+                print(f"  🔍 Checking against {len(all_profiles)} voice profiles (general + emotion-specific)")
 
-        # Match against ALL profiles
+        # Match against ALL profiles (silent, only print best match)
         for profile in all_profiles:
             similarity = cosine_similarity(
                 segment_embedding.reshape(1, -1),
                 profile['embedding'].reshape(1, -1)
             )[0][0]
-
-            profile_desc = f"{profile['speaker_name']}"
-            if profile['emotion']:
-                profile_desc += f"_{profile['emotion']} ({profile['sample_count']} voice samples)"
-
-            print(f"    - {profile_desc}: {similarity:.4f}")
 
             if similarity > best_similarity:
                 best_similarity = similarity

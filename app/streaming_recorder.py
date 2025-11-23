@@ -22,7 +22,7 @@ class StreamingRecorder:
         sample_rate: int = 48000,
         silence_threshold: float = 0.005,
         silence_duration: float = None,
-        max_workers: int = 2
+        max_workers: int = 2  # Parallel processing (cache prevents memory spikes)
     ):
         """
         Initialize streaming recorder
@@ -31,7 +31,7 @@ class StreamingRecorder:
             sample_rate: Audio sample rate (Hz)
             silence_threshold: Energy threshold for silence detection
             silence_duration: Seconds of silence before processing segment (default from .env or 0.5s)
-            max_workers: Number of parallel processing threads
+            max_workers: Number of parallel processing threads (default: 2 for parallel)
         """
         self.sample_rate = sample_rate
         self.silence_threshold = silence_threshold
