@@ -1,4 +1,13 @@
+import os
+
+# Fix for PyTorch 2.6+ weights_only=True breaking change
+# Required for loading pyannote.audio model checkpoints which contain
+# pickled objects (omegaconf, pytorch_lightning callbacks, etc.)
+# This must be set BEFORE importing torch
+os.environ['TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD'] = '1'
+
 import torch
+
 import numpy as np
 from pyannote.audio import Pipeline, Model, Inference
 from sklearn.metrics.pairwise import cosine_similarity
@@ -11,6 +20,7 @@ from pydub import AudioSegment
 import threading
 import queue
 import gc
+
 
 
 def auto_enroll_unknown_speaker(embedding: np.ndarray, db_session, threshold: float = 0.30):

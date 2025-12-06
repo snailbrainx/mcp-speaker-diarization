@@ -1,6 +1,16 @@
 """
 Live continuous recording with VAD-based segmentation
 """
+import os
+
+# Fix for PyTorch 2.6+ weights_only=True breaking change
+# Required for loading pyannote.audio model checkpoints which contain
+# pickled objects (omegaconf, pytorch_lightning callbacks, etc.)
+# This must be set BEFORE importing torch
+os.environ['TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD'] = '1'
+
+import torch
+
 import sounddevice as sd
 import numpy as np
 import wave
@@ -11,7 +21,6 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional, Callable
 from pyannote.audio import Pipeline
-import torch
 
 from .diarization import SpeakerRecognitionEngine
 
